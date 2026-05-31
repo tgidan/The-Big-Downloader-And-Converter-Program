@@ -55,47 +55,19 @@ def _resolve_ffmpeg(ffmpeg_location: str | None) -> str | None:
 
 # Format fetching #
 
-"""
-Retrieve available formats for a URL without downloading anything.
-
-Returns a list of dicts:
-    {
-        "format_id": str,
-        "ext":       str,
-        "height":    int | None,   # None for audio-only streams
-        "note":      str,          # human-readable label, e.g. "1080p, 30fps"
-        "vcodec":    str,
-        "acodec":    str,
-        "filesize":  int | None,   # bytes, may be None
-    }
-
-Raises yt_dlp.utils.DownloadError for private/unavailable videos.
-"""
-def fetch_formats(url: str) -> list[dict]:
-    
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-
+"""Parse the formats list from a raw yt-dlp info dict."""
+def _extract_formats(info: dict) -> list[dict]:
     formats = []
     for f in info.get("formats", []):
         height = f.get("height")
         vcodec = f.get("vcodec", "none")
-        fps = f.get("fps")
-
-        # Build a human-readable note
-        parts = []
+        fps    = f.get("fps")
+        parts  = []
         if height:
             parts.append(f"{height}p" + (f", {int(fps)}fps" if fps else ""))
         if vcodec == "none":
             parts.append("audio only")
         note = f.get("format_note") or (", ".join(parts) if parts else f.get("format_id", ""))
-
         formats.append({
             "format_id": f["format_id"],
             "ext":       f.get("ext", ""),
@@ -105,8 +77,33 @@ def fetch_formats(url: str) -> list[dict]:
             "acodec":    f.get("acodec", "none"),
             "filesize":  f.get("filesize") or f.get("filesize_approx"),
         })
-
     return formats
+
+
+"""
+Retrieve available formats for a URL without downloading anything.
+
+Returns a list of dicts with keys: format_id, ext, height, note, vcodec,
+acodec, filesize. Raises yt_dlp.utils.DownloadError for unavailable videos.
+"""
+def fetch_formats(url: str) -> list[dict]:
+    ydl_opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    return _extract_formats(info)
+
+
+"""
+Fetch formats AND the full yt-dlp info dict (title, thumbnail, duration…).
+
+Returns (formats, info) so callers can display a rich video preview without
+a second network round-trip.
+"""
+def fetch_info(url: str) -> tuple[list[dict], dict]:
+    ydl_opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    return _extract_formats(info), info
 
 
 # Format string helpers #
@@ -116,6 +113,7 @@ def build_video_format_string(height: int) -> str:
     return f"bestvideo[height<={height}]+bestaudio/best"
 
 
+"""Return the yt-dlp format string for the best available audio stream."""
 def build_audio_format_string() -> str:
     return "bestaudio/best"
 
@@ -143,8 +141,12 @@ def download(
     ffmpeg_location: str | None = None,
     cookiefile: str | None = None,
 ) -> None:
-    
-    resolved_ffmpeg = _resolve_ffmpeg(ffmpeg_location)
+
+    try:
+        resolved_ffmpeg = _resolve_ffmpeg(ffmpeg_location)
+    except RuntimeError as exc:
+        progress_queue.put({"status": "error", "message": str(exc)})
+        return
 
     def _progress_hook(d: dict) -> None:
         status = d.get("status")
@@ -203,21 +205,13 @@ def download(
 
 # yt-dlp update check (optional startup call) #
 
-"""
-Returns a message string if an update is available, else None.
-Non-fatal, swallows all errors.
-"""
-def check_ytdlp_update() -> str | None:
+"""Return the latest yt-dlp version string from PyPI, or None on error."""
+def get_ytdlp_latest_version() -> str | None:
     try:
-        result = subprocess.run(
-            ["yt-dlp", "--update-to", "stable", "--no-download"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        output = result.stdout + result.stderr
-        if "up to date" in output.lower():
-            return None
-        return output.strip() or None
+        import json as _json
+        import urllib.request
+        with urllib.request.urlopen("https://pypi.org/pypi/yt-dlp/json", timeout=8) as resp:
+            data = _json.loads(resp.read())
+        return data["info"]["version"]
     except Exception:
         return None

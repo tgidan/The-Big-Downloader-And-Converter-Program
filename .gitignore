@@ -1,2 +1,5 @@
 VideoDownloader&Conversion App/tests/__pycache__/
 VideoDownloader&Conversion App/core/__pycache__/
+VideoDownloader&Conversion App/ui/__pycache__/
+__pycache__/
+.pytest_cache/
