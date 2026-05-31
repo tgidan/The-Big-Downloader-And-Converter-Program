@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Literal
 
-from core import downloader
+from core import config_manager, downloader
 
 Status = Literal["pending", "downloading", "done", "error", "cancelled"]
 
@@ -141,6 +141,7 @@ class QueueManager:
         dl_thread = threading.Thread(
             target=downloader.download,
             args=(job.url, job.format_string, job.output_dir, job_queue),
+            kwargs={"ffmpeg_location": config_manager.get("ffmpeg_location")},
             daemon=True,
             name=f"yt-{job.id[:8]}",
         )
