@@ -1,4 +1,8 @@
-"""Tests for core/downloader.py"""
+"""
+tests/test_downloader.py
+
+Tests for core/downloader.py.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.downloader import (
     _is_windows,
     _resolve_ffmpeg,
+    _LoudnormPP,
     fetch_formats,
     build_video_format_string,
     build_audio_format_string,
@@ -81,8 +86,8 @@ class TestResolveFfmpeg:
 
 # ── fetch_formats ─────────────────────────────────────────────────────────────
 
+"""Context-manager mock for yt_dlp.YoutubeDL returning fake info."""
 def _ydl_ctx(info: dict):
-    """Context-manager mock for yt_dlp.YoutubeDL returning fake info."""
     instance = MagicMock()
     instance.extract_info.return_value = info
     ctx = MagicMock()
@@ -188,19 +193,23 @@ def test_build_audio_format_string():
 
 # ── download ──────────────────────────────────────────────────────────────────
 
+"""
+Captures ydl_opts (including the progress_hook closure) so the hook can be
+exercised directly without touching the network.
+"""
 class TestDownload:
-    """
-    Captures ydl_opts (including the progress_hook closure) so the hook can be
-    exercised directly without touching the network.
-    """
 
     def _make_fake_ydl_cls(self, captured: dict):
         class FakeYDL:
             def __init__(self_, opts):
                 captured.update(opts)
+                captured.setdefault("_post_processors", [])
+                self_.params = opts   # required by FFmpegPostProcessor.get_param()
             def __enter__(self_): return self_
             def __exit__(self_, *a): return False
             def download(self_, urls): pass
+            def add_post_processor(self_, pp, when="post_process"):
+                captured["_post_processors"].append((pp, when))
         return FakeYDL
 
     def _run(self, captured: dict, *, url="http://example.com",
@@ -332,6 +341,137 @@ class TestDownload:
         opts = {}
         self._run(opts, output_dir=tmp_path, fmt="bestvideo+bestaudio")
         assert opts["format"] == "bestvideo+bestaudio"
+
+    # ── loudness normalization ────────────────────────────────────────────────
+
+    def test_loudness_normalization_off_no_pp_registered(self, tmp_path):
+        opts = {}
+        self._run(opts, output_dir=tmp_path, loudness_normalization=False)
+        assert opts["_post_processors"] == []
+
+    def test_loudness_normalization_off_no_postprocessor_args(self, tmp_path):
+        opts = {}
+        self._run(opts, output_dir=tmp_path, loudness_normalization=False)
+        assert "postprocessor_args" not in opts
+
+    def test_loudness_normalization_on_registers_one_pp(self, tmp_path):
+        opts = {}
+        self._run(opts, output_dir=tmp_path, loudness_normalization=True)
+        assert len(opts["_post_processors"]) == 1
+
+    def test_loudness_normalization_on_registers_after_move(self, tmp_path):
+        opts = {}
+        self._run(opts, output_dir=tmp_path, loudness_normalization=True)
+        _, when = opts["_post_processors"][0]
+        assert when == "after_move"
+
+    def test_loudness_normalization_pp_is_loudnorm_type(self, tmp_path):
+        opts = {}
+        self._run(opts, output_dir=tmp_path, loudness_normalization=True)
+        pp, _ = opts["_post_processors"][0]
+        assert isinstance(pp, _LoudnormPP)
+
+    def test_loudness_normalization_default_lufs_on_pp(self, tmp_path):
+        opts = {}
+        self._run(opts, output_dir=tmp_path, loudness_normalization=True)
+        pp, _ = opts["_post_processors"][0]
+        assert pp._target_lufs == -14.0
+
+    def test_loudness_normalization_custom_lufs_on_pp(self, tmp_path):
+        opts = {}
+        self._run(opts, output_dir=tmp_path, loudness_normalization=True, loudness_target_lufs=-23.0)
+        pp, _ = opts["_post_processors"][0]
+        assert pp._target_lufs == -23.0
+
+    def test_loudness_normalization_skipped_for_audio_only(self, tmp_path):
+        opts = {}
+        self._run(opts, output_dir=tmp_path, loudness_normalization=True, audio_only=True)
+        assert opts["_post_processors"] == []
+
+    def test_loudness_normalization_no_postprocessor_args_in_opts(self, tmp_path):
+        opts = {}
+        self._run(opts, output_dir=tmp_path, loudness_normalization=True)
+        assert "postprocessor_args" not in opts
+
+
+# ── _LoudnormPP ───────────────────────────────────────────────────────────────
+
+class TestLoudnormPP:
+
+    def _pp(self, lufs: float = -14.0) -> _LoudnormPP:
+        return _LoudnormPP(None, target_lufs=lufs)
+
+    def _mock_run_ffmpeg(self, pp: _LoudnormPP, captured: list):
+        """Patch run_ffmpeg to write a sentinel file and record args."""
+        def fake(inp, out, args):
+            Path(out).write_text("normalized")
+            captured.extend(args)
+        pp.run_ffmpeg = fake
+
+    def test_skips_missing_filepath_key(self):
+        _, info = self._pp().run({})
+        assert info == {}
+
+    def test_skips_nonexistent_file(self, tmp_path):
+        _, info = self._pp().run({"filepath": str(tmp_path / "nope.mp4")})
+        assert info == {"filepath": str(tmp_path / "nope.mp4")}
+
+    def test_replaces_original_with_normalized(self, tmp_path):
+        src = tmp_path / "video.mp4"
+        src.write_text("original")
+        pp = self._pp()
+        self._mock_run_ffmpeg(pp, [])
+        pp.run({"filepath": str(src)})
+        assert src.read_text() == "normalized"
+
+    def test_filter_contains_loudnorm_with_lufs(self, tmp_path):
+        src = tmp_path / "video.mp4"
+        src.write_text("x")
+        pp = self._pp(lufs=-23.0)
+        args: list = []
+        self._mock_run_ffmpeg(pp, args)
+        pp.run({"filepath": str(src)})
+        filter_str = " ".join(args)
+        assert "loudnorm" in filter_str
+        assert "I=-23" in filter_str
+
+    def test_filter_tp_and_lra_constants(self, tmp_path):
+        src = tmp_path / "video.mp4"
+        src.write_text("x")
+        pp = self._pp()
+        args: list = []
+        self._mock_run_ffmpeg(pp, args)
+        pp.run({"filepath": str(src)})
+        filter_str = " ".join(args)
+        assert "TP=-1" in filter_str
+        assert "LRA=11" in filter_str
+
+    def test_video_stream_copied(self, tmp_path):
+        src = tmp_path / "video.mp4"
+        src.write_text("x")
+        pp = self._pp()
+        args: list = []
+        self._mock_run_ffmpeg(pp, args)
+        pp.run({"filepath": str(src)})
+        assert "-c:v" in args
+        assert "copy" in args
+
+    def test_cleans_up_temp_on_ffmpeg_failure(self, tmp_path):
+        src = tmp_path / "video.mp4"
+        src.write_text("original")
+        pp = self._pp()
+
+        def failing_run_ffmpeg(inp, out, args):
+            Path(out).write_text("partial")
+            raise RuntimeError("ffmpeg crashed")
+
+        pp.run_ffmpeg = failing_run_ffmpeg
+
+        with pytest.raises(RuntimeError):
+            pp.run({"filepath": str(src)})
+
+        assert not list(tmp_path.glob("*.loudnorm*"))
+        assert src.read_text() == "original"
 
 
 # ── check_ytdlp_update ────────────────────────────────────────────────────────

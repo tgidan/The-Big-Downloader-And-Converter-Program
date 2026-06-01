@@ -2,9 +2,10 @@
 main.py
 
 Entry point for TBD&C — The Big Downloader & Converter.
+Bootstraps CTk, loads config, and wires QueueManager -> AppWindow.
 
-Usage:
-  python main.py
+Public API:
+main()   – initialise CTk, load config, create AppWindow, start event loop
 """
 
 from __future__ import annotations
@@ -48,14 +49,13 @@ def _patch_scaling_tracker() -> None:
 
 """
 Validate required tools before the window opens.
-Hard failures (missing yt-dlp or ffmpeg) show a blocking error dialog
-and exit; soft warnings are deferred to the in-app banner.
+Missing yt-dlp is a hard fatal (the app cannot function at all).
+Missing ffmpeg is a soft warning — the user can configure a path in Settings
+without restarting, so we never block startup for it.
 """
 def _preflight_checks() -> None:
-    import shutil
     import tkinter as tk
     import tkinter.messagebox as mb
-    from pathlib import Path
 
     def _fatal(title: str, message: str) -> None:
         root = tk.Tk()
@@ -64,43 +64,13 @@ def _preflight_checks() -> None:
         root.destroy()
         sys.exit(1)
 
-    # yt-dlp
+    # yt-dlp — hard failure: nothing works without it
     try:
         import yt_dlp as _  # noqa: F401
     except ImportError:
         _fatal(
             "Missing dependency",
             "yt-dlp is not installed.\n\nRun:  pip install yt-dlp",
-        )
-
-    # ffmpeg
-    from core import config_manager
-
-    ffmpeg_location: str | None = config_manager.get("ffmpeg_location")
-    ffmpeg_ok = False
-
-    if ffmpeg_location:
-        candidate = Path(ffmpeg_location)
-        binary = (
-            candidate / ("ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")
-            if candidate.is_dir()
-            else candidate
-        )
-        ffmpeg_ok = binary.is_file()
-    else:
-        ffmpeg_ok = bool(shutil.which("ffmpeg"))
-
-    if not ffmpeg_ok:
-        where = f"\n\nLooked in: {ffmpeg_location}" if ffmpeg_location else ""
-        _fatal(
-            "ffmpeg not found",
-            "ffmpeg is required but could not be found."
-            + where
-            + "\n\nInstall it, then restart the application:\n"
-            "  Windows:  winget install Gyan.FFmpeg\n"
-            "  macOS:    brew install ffmpeg\n"
-            "  Linux:    sudo apt install ffmpeg\n\n"
-            "Or download from https://ffmpeg.org/download.html and add it to PATH.",
         )
 
 

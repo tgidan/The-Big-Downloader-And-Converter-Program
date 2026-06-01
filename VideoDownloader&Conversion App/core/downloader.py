@@ -3,6 +3,15 @@ core/downloader.py
 
 yt-dlp wrapper, zero UI imports.
 All progress is communicated via queue.Queue; never touches widgets directly.
+
+Public API:
+fetch_formats(url)                               – list of available format dicts
+fetch_info(url)                                  – (formats, info) without downloading
+build_video_format_string(height)                – yt-dlp format string for a height cap
+build_audio_format_string()                      – yt-dlp format string for best audio
+download(url, format_string, output_dir, q, …)  – blocking download; push progress to q
+check_ytdlp_update()                             – run yt-dlp --update-to stable
+get_ytdlp_latest_version()                       – fetch latest version string from PyPI
 """
 
 from __future__ import annotations
@@ -14,8 +23,9 @@ from pathlib import Path
 
 import yt_dlp
 
-# ffmpeg validation # 
+# ffmpeg validation #
 
+"""Return True when running on Windows."""
 def _is_windows() -> bool:
     import sys
     return sys.platform == "win32"
@@ -118,6 +128,43 @@ def build_audio_format_string() -> str:
     return "bestaudio/best"
 
 
+# Loudness normalisation postprocessor #
+
+"""
+Runs EBU R128 loudness normalization on the final output file as a separate
+ffmpeg pass, completely isolated from yt-dlp's own merge/fixup pipeline.
+
+Registered with `when="after_move"` so it only runs once, on the finished
+file, after yt-dlp has completed all its own postprocessing.
+"""
+class _LoudnormPP(yt_dlp.postprocessor.FFmpegPostProcessor):
+
+    def __init__(self, downloader=None, *, target_lufs: float = -14.0) -> None:
+        super().__init__(downloader)
+        self._target_lufs = target_lufs
+
+    def run(self, info: dict) -> tuple[list, dict]:
+        filepath = info.get("filepath")
+        if not filepath or not Path(filepath).is_file():
+            return [], info
+
+        p   = Path(filepath)
+        tmp = p.parent / (p.stem + ".loudnorm" + p.suffix)
+
+        try:
+            self.run_ffmpeg(
+                str(p), str(tmp),
+                ["-af", f"loudnorm=I={int(self._target_lufs)}:TP=-1:LRA=11",
+                 "-c:v", "copy"],
+            )
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+
+        tmp.replace(p)
+        return [], info
+
+
 # Download #
 
 """
@@ -140,6 +187,8 @@ def download(
     audio_only: bool = False,
     ffmpeg_location: str | None = None,
     cookiefile: str | None = None,
+    loudness_normalization: bool = False,
+    loudness_target_lufs: float = -14.0,
 ) -> None:
 
     try:
@@ -197,6 +246,11 @@ def download(
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            if loudness_normalization and not audio_only:
+                ydl.add_post_processor(
+                    _LoudnormPP(ydl, target_lufs=loudness_target_lufs),
+                    when="after_move",
+                )
             ydl.download([url])
     except yt_dlp.utils.DownloadError as exc:
         progress_queue.put({"status": "error", "message": str(exc)})
@@ -204,6 +258,28 @@ def download(
 
 
 # yt-dlp update check (optional startup call) #
+
+"""
+Run `yt-dlp --update-to stable` and return the output message.
+
+Returns None when yt-dlp is already up to date, output is empty, or any
+exception occurs (no network, missing binary, etc.).
+"""
+def check_ytdlp_update() -> str | None:
+    try:
+        result = subprocess.run(
+            ["yt-dlp", "--update-to", "stable"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        combined = (result.stdout + result.stderr).strip()
+        if not combined or "up to date" in combined.lower():
+            return None
+        return result.stdout.strip() or result.stderr.strip() or None
+    except Exception:
+        return None
+
 
 """Return the latest yt-dlp version string from PyPI, or None on error."""
 def get_ytdlp_latest_version() -> str | None:

@@ -42,6 +42,7 @@ _WARN_HOVER = ("#FDE68A", "#5C4000")
 """Root window — instantiates and wires all panels."""
 class AppWindow(ctk.CTk):
 
+    """Wire panels, set geometry and icon, then schedule startup checks after 600 ms."""
     def __init__(self, queue_manager: QueueManager) -> None:
         super().__init__()
         self._qm = queue_manager
@@ -66,6 +67,7 @@ class AppWindow(ctk.CTk):
 
     # Layout #
 
+    """Grid all four rows: header (0), warning banner (1), content (2), status bar (3)."""
     def _build(self) -> None:
         self.grid_rowconfigure(2, weight=1)  # content row; row 1 is the collapsible banner
         self.grid_columnconfigure(0, weight=1)
@@ -75,6 +77,7 @@ class AppWindow(ctk.CTk):
         self._build_content()         # row 2
         self._build_statusbar()       # row 3
 
+    """Bordeaux header strip: app name, subtitle, and folder/settings icon buttons."""
     def _build_header(self) -> None:
         hdr = ctk.CTkFrame(
             self,
@@ -124,6 +127,7 @@ class AppWindow(ctk.CTk):
             **icon_kw,
         ).pack(side="left", padx=4)
 
+    """Left scroll pane (URL + Quality), vertical separator, right sidebar (Queue)."""
     def _build_content(self) -> None:
         content = ctk.CTkFrame(self, fg_color="transparent")
         content.grid(row=2, column=0, sticky="nsew")
@@ -182,6 +186,7 @@ class AppWindow(ctk.CTk):
         )
         self._download_panel.pack(fill="both", expand=True, padx=14, pady=14)
 
+    """Thin footer row with a mutable status label."""
     def _build_statusbar(self) -> None:
         bar = ctk.CTkFrame(
             self,
@@ -246,6 +251,7 @@ class AppWindow(ctk.CTk):
             command=self._dismiss_banner,
         ).pack(side="right", padx=(6, 0))
 
+    """Populate and grid the amber warning banner; show Update button when has_update."""
     def _show_warnings(self, warnings: list[str], has_update: bool = False) -> None:
         if not warnings:
             return
@@ -256,6 +262,7 @@ class AppWindow(ctk.CTk):
             self._banner_update_btn.pack_forget()
         self._banner.grid(row=1, column=0, sticky="ew")
 
+    """Remove the warning banner from the grid layout."""
     def _dismiss_banner(self) -> None:
         self._banner.grid_remove()
 
@@ -292,15 +299,26 @@ class AppWindow(ctk.CTk):
 
     # Header actions #
 
+    """Open the output-folder picker via QualityPanel."""
     def _pick_output_dir(self) -> None:
         self._quality_panel.open_output_picker()
 
-    """Settings dialog — not yet implemented."""
+    """Open the SettingsPanel modal dialog."""
     def _open_settings(self) -> None:
-        pass
+        from ui.settings_panel import SettingsPanel
+        SettingsPanel(self, on_save=self._on_settings_saved)
+
+    """Re-run startup checks on a background thread after settings are saved."""
+    def _on_settings_saved(self) -> None:
+        threading.Thread(
+            target=self._check_thread,
+            daemon=True,
+            name="tbdc-settings-check",
+        ).start()
 
     # Startup checks #
 
+    """Spawn the background check thread (versions, update nag, cookie path)."""
     def _startup_checks(self) -> None:
         threading.Thread(
             target=self._check_thread,
@@ -308,6 +326,7 @@ class AppWindow(ctk.CTk):
             name="tbdc-startup",
         ).start()
 
+    """Check yt-dlp version, compare to PyPI, validate cookie path; update status bar."""
     def _check_thread(self) -> None:
         # Versions
         try:
@@ -356,6 +375,7 @@ class AppWindow(ctk.CTk):
 
     # Update dialog #
 
+    """Modal offering to run yt-dlp --update-to stable."""
     def _show_update_dialog(self) -> None:
         dlg = ctk.CTkToplevel(self)
         dlg.title("yt-dlp update")
@@ -406,6 +426,7 @@ class AppWindow(ctk.CTk):
             command=lambda: self._run_update(dlg),
         ).pack(side="right")
 
+    """Dismiss dialog, start yt-dlp update in a daemon thread, update status bar text."""
     def _run_update(self, dlg: ctk.CTkToplevel) -> None:
         dlg.destroy()
         import subprocess

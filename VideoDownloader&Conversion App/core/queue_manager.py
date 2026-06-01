@@ -19,14 +19,15 @@ from core import config_manager, downloader
 Status = Literal["pending", "downloading", "done", "error", "cancelled"]
 
 
+"""A single download job tracked by QueueManager."""
 @dataclass
 class DownloadJob:
-    id: str
-    url: str
+    id:            str
+    url:           str
     format_string: str
-    output_dir: str
-    status: Status = "pending"
-    progress: float = 0.0
+    output_dir:    str
+    status:        Status = "pending"
+    progress:      float  = 0.0
 
 
 """
@@ -52,6 +53,7 @@ class QueueManager:
 
     # Public API #
 
+    """Thread-safe snapshot of the current job list."""
     @property
     def jobs(self) -> list[DownloadJob]:
         with self._lock:
@@ -122,6 +124,7 @@ class QueueManager:
 
     # Internal #
 
+    """Update job.status and push a status_change event to update_queue."""
     def _set_status(self, job: DownloadJob, status: Status) -> None:
         with self._lock:
             job.status = status
@@ -141,7 +144,12 @@ class QueueManager:
         dl_thread = threading.Thread(
             target=downloader.download,
             args=(job.url, job.format_string, job.output_dir, job_queue),
-            kwargs={"ffmpeg_location": config_manager.get("ffmpeg_location")},
+            kwargs={
+                "ffmpeg_location":        config_manager.get("ffmpeg_path"),
+                "cookiefile":             config_manager.get("cookiefile"),
+                "loudness_normalization": config_manager.get("loudness_normalization", False),
+                "loudness_target_lufs":   config_manager.get("loudness_target_lufs", -14.0),
+            },
             daemon=True,
             name=f"yt-{job.id[:8]}",
         )
