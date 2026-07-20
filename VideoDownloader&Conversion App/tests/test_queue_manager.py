@@ -75,6 +75,28 @@ class TestDownloadJob:
         assert job.format_string == "best"
         assert job.output_dir == "/out"
 
+    def test_default_custom_filename_is_none(self):
+        job = DownloadJob(id="x", url="u", format_string="f", output_dir="/tmp")
+        assert job.custom_filename is None
+
+    def test_custom_filename_set_correctly(self):
+        job = DownloadJob(
+            id="x", url="u", format_string="f", output_dir="/tmp",
+            custom_filename="My Video",
+        )
+        assert job.custom_filename == "My Video"
+
+    def test_default_overwrite_is_false(self):
+        job = DownloadJob(id="x", url="u", format_string="f", output_dir="/tmp")
+        assert job.overwrite is False
+
+    def test_overwrite_set_correctly(self):
+        job = DownloadJob(
+            id="x", url="u", format_string="f", output_dir="/tmp",
+            overwrite=True,
+        )
+        assert job.overwrite is True
+
 
 # ── QueueManager.add ──────────────────────────────────────────────────────────
 
@@ -114,6 +136,26 @@ class TestAdd:
         qm = QueueManager()
         ids = [qm.add("http://x.com", "best", "/tmp") for _ in range(5)]
         assert len(set(ids)) == 5
+
+    def test_default_custom_filename_is_none(self):
+        qm = QueueManager()
+        qm.add("http://x.com", "best", "/tmp")
+        assert qm.jobs[0].custom_filename is None
+
+    def test_custom_filename_stored_on_job(self):
+        qm = QueueManager()
+        qm.add("http://x.com", "best", "/tmp", custom_filename="My Video")
+        assert qm.jobs[0].custom_filename == "My Video"
+
+    def test_default_overwrite_is_false(self):
+        qm = QueueManager()
+        qm.add("http://x.com", "best", "/tmp")
+        assert qm.jobs[0].overwrite is False
+
+    def test_overwrite_stored_on_job(self):
+        qm = QueueManager()
+        qm.add("http://x.com", "best", "/tmp", overwrite=True)
+        assert qm.jobs[0].overwrite is True
 
 
 # ── QueueManager.start_next ───────────────────────────────────────────────────
@@ -199,6 +241,71 @@ class TestStartNext:
             time.sleep(0.15)
 
         assert calls == ["http://b.com"]
+
+
+# ── custom_filename threading ─────────────────────────────────────────────────
+
+class TestCustomFilenameThreading:
+
+    def test_custom_filename_passed_to_downloader(self):
+        qm = QueueManager()
+        qm.add("http://x.com", "best", "/tmp", custom_filename="My Video")
+
+        captured = {}
+
+        def _capture(url, fmt, out, pq, **kw):
+            captured.update(kw)
+
+        with patch("core.queue_manager.downloader.download", side_effect=_capture):
+            qm.start_next()
+            time.sleep(0.15)
+
+        assert captured["custom_filename"] == "My Video"
+
+    def test_none_custom_filename_passed_to_downloader(self):
+        qm = QueueManager()
+        qm.add("http://x.com", "best", "/tmp")
+
+        captured = {}
+
+        def _capture(url, fmt, out, pq, **kw):
+            captured.update(kw)
+
+        with patch("core.queue_manager.downloader.download", side_effect=_capture):
+            qm.start_next()
+            time.sleep(0.15)
+
+        assert captured["custom_filename"] is None
+
+    def test_default_overwrite_passed_to_downloader(self):
+        qm = QueueManager()
+        qm.add("http://x.com", "best", "/tmp")
+
+        captured = {}
+
+        def _capture(url, fmt, out, pq, **kw):
+            captured.update(kw)
+
+        with patch("core.queue_manager.downloader.download", side_effect=_capture):
+            qm.start_next()
+            time.sleep(0.15)
+
+        assert captured["overwrite"] is False
+
+    def test_overwrite_true_passed_to_downloader(self):
+        qm = QueueManager()
+        qm.add("http://x.com", "best", "/tmp", overwrite=True)
+
+        captured = {}
+
+        def _capture(url, fmt, out, pq, **kw):
+            captured.update(kw)
+
+        with patch("core.queue_manager.downloader.download", side_effect=_capture):
+            qm.start_next()
+            time.sleep(0.15)
+
+        assert captured["overwrite"] is True
 
 
 # ── Progress forwarding ───────────────────────────────────────────────────────

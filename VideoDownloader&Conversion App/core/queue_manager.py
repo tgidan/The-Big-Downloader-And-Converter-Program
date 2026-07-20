@@ -28,6 +28,8 @@ class DownloadJob:
     output_dir:    str
     status:        Status = "pending"
     progress:      float  = 0.0
+    custom_filename: str | None = None
+    overwrite:       bool = False
 
 
 """
@@ -60,13 +62,23 @@ class QueueManager:
             return list(self._jobs)
         
     """Enqueue a new download job. Returns the job_id."""
-    def add(self, url: str, format_string: str, output_dir: str) -> str:
-       
+    def add(
+        self,
+        url: str,
+        format_string: str,
+        output_dir: str,
+        *,
+        custom_filename: str | None = None,
+        overwrite: bool = False,
+    ) -> str:
+
         job = DownloadJob(
             id=str(uuid.uuid4()),
             url=url,
             format_string=format_string,
             output_dir=output_dir,
+            custom_filename=custom_filename,
+            overwrite=overwrite,
         )
         with self._lock:
             self._jobs.append(job)
@@ -149,6 +161,8 @@ class QueueManager:
                 "cookiefile":             config_manager.get("cookiefile"),
                 "loudness_normalization": config_manager.get("loudness_normalization", False),
                 "loudness_target_lufs":   config_manager.get("loudness_target_lufs", -14.0),
+                "custom_filename":        job.custom_filename,
+                "overwrite":              job.overwrite,
             },
             daemon=True,
             name=f"yt-{job.id[:8]}",

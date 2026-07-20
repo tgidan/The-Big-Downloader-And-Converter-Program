@@ -337,6 +337,43 @@ class TestDownload:
         self._run(opts, output_dir=tmp_path)
         assert str(tmp_path) in opts["outtmpl"]
 
+    def test_no_custom_filename_uses_title_template(self, tmp_path):
+        opts = {}
+        self._run(opts, output_dir=tmp_path, custom_filename=None)
+        assert opts["outtmpl"] == str(tmp_path / "%(title)s.%(ext)s")
+
+    def test_custom_filename_used_in_outtmpl(self, tmp_path):
+        opts = {}
+        self._run(opts, output_dir=tmp_path, custom_filename="My Custom Name")
+        assert opts["outtmpl"] == str(tmp_path / "My Custom Name.%(ext)s")
+
+    def test_custom_filename_with_illegal_chars_is_sanitized(self, tmp_path):
+        opts = {}
+        self._run(opts, output_dir=tmp_path, custom_filename='My*Video?Name')
+        assert opts["outtmpl"] == str(tmp_path / "MyVideoName.%(ext)s")
+
+    def test_custom_filename_with_percent_is_escaped(self, tmp_path):
+        opts = {}
+        self._run(opts, output_dir=tmp_path, custom_filename="100% Real Footage")
+        assert opts["outtmpl"] == str(tmp_path / "100%% Real Footage.%(ext)s")
+
+    # ── overwrite / nooverwrites ──────────────────────────────────────────────
+
+    def test_default_overwrite_false_sets_nooverwrites(self, tmp_path):
+        opts = {}
+        self._run(opts, output_dir=tmp_path)
+        assert opts["nooverwrites"] is True
+
+    def test_explicit_overwrite_false_sets_nooverwrites(self, tmp_path):
+        opts = {}
+        self._run(opts, output_dir=tmp_path, overwrite=False)
+        assert opts["nooverwrites"] is True
+
+    def test_overwrite_true_omits_nooverwrites(self, tmp_path):
+        opts = {}
+        self._run(opts, output_dir=tmp_path, overwrite=True)
+        assert "nooverwrites" not in opts
+
     def test_format_string_passed_to_opts(self, tmp_path):
         opts = {}
         self._run(opts, output_dir=tmp_path, fmt="bestvideo+bestaudio")

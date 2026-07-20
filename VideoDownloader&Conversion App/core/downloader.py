@@ -23,6 +23,8 @@ from pathlib import Path
 
 import yt_dlp
 
+from core.utils import sanitize_filename
+
 # ffmpeg validation #
 
 """Return True when running on Windows."""
@@ -176,6 +178,16 @@ Progress updates are pushed onto `progress_queue` as dicts:
     { "status": "finished",   "filename": str }
     { "status": "error",      "message": str }
 
+`custom_filename`, when set, is sanitized via core.utils.sanitize_filename and
+used as the output base name instead of the video title. If it is None, empty,
+or sanitizes to nothing, the default "%(title)s.%(ext)s" template is used.
+
+`overwrite`, when False (the default), sets yt-dlp's "nooverwrites" option so
+an existing file at the target path is never silently overwritten. Callers
+are responsible for resolving conflicts (auto-numbering, user approval, etc.)
+before this point — there is a TOCTOU gap between that check and the actual
+write, which is acceptable for a single-user desktop app.
+
 Raises RuntimeError if ffmpeg is required but unavailable.
 """
 def download(
@@ -189,6 +201,8 @@ def download(
     cookiefile: str | None = None,
     loudness_normalization: bool = False,
     loudness_target_lufs: float = -14.0,
+    custom_filename: str | None = None,
+    overwrite: bool = False,
 ) -> None:
 
     try:
@@ -221,13 +235,22 @@ def download(
                 "message": str(d.get("error", "Unknown error")),
             })
 
+    sanitized_name = sanitize_filename(custom_filename) if custom_filename else ""
+    if sanitized_name and sanitized_name != "download":
+        outtmpl = str(Path(output_dir) / f"{sanitized_name.replace('%', '%%')}.%(ext)s")
+    else:
+        outtmpl = str(Path(output_dir) / "%(title)s.%(ext)s")
+
     ydl_opts: dict = {
         "format":         format_string,
-        "outtmpl":        str(Path(output_dir) / "%(title)s.%(ext)s"),
+        "outtmpl":        outtmpl,
         "progress_hooks": [_progress_hook],
         "quiet":          True,
         "no_warnings":    True,
     }
+
+    if not overwrite:
+        ydl_opts["nooverwrites"] = True
 
     if resolved_ffmpeg:
         ydl_opts["ffmpeg_location"] = resolved_ffmpeg

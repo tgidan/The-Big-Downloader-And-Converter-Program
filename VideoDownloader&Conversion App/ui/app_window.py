@@ -23,6 +23,7 @@ from pathlib import Path
 import customtkinter as ctk
 
 from core.queue_manager import QueueManager
+from core.utils import find_conflicts, unique_path
 from ui.download_panel import DownloadPanel
 from ui.quality_panel import QualityPanel
 from ui.url_panel import URLPanel
@@ -143,9 +144,16 @@ class AppWindow(ctk.CTk):
         )
         left_scroll.grid(row=0, column=0, sticky="nsew")
 
+        # Constructed before URLPanel so its get_output_dir can be passed in
+        self._quality_panel = QualityPanel(
+            left_scroll,
+            on_add_to_queue=self._add_to_queue,
+        )
+
         self._url_panel = URLPanel(
             left_scroll,
             on_formats_fetched=self._on_formats_fetched,
+            get_output_dir=self._quality_panel.get_output_dir,
         )
         self._url_panel.pack(fill="x", padx=24, pady=(22, 0))
 
@@ -156,10 +164,6 @@ class AppWindow(ctk.CTk):
             fg_color=("gray88", "gray22"),
         ).pack(fill="x", padx=24, pady=18)
 
-        self._quality_panel = QualityPanel(
-            left_scroll,
-            on_add_to_queue=self._add_to_queue,
-        )
         self._quality_panel.pack(fill="x", padx=24, pady=(0, 24))
 
         # Vertical separator #
@@ -276,14 +280,24 @@ class AppWindow(ctk.CTk):
         self._quality_panel.populate(url, formats, info)
 
     """Relay from QualityPanel -> QueueManager."""
-    def _add_to_queue(self, url: str, format_string: str, audio_only: bool) -> None:
+    def _add_to_queue(
+        self,
+        url: str,
+        format_string: str,
+        audio_only: bool,
+        custom_filename: str | None = None,
+        overwrite: bool = False,
+    ) -> None:
         output_dir = self._quality_panel.get_output_dir()
         os.makedirs(output_dir, exist_ok=True)
 
-        job_id = self._qm.add(url, format_string, output_dir)
+        job_id = self._qm.add(
+            url, format_string, output_dir,
+            custom_filename=custom_filename, overwrite=overwrite,
+        )
 
         # Set a human-readable title before the first poll cycle fires
-        title = getattr(self, "_last_title", url)
+        title = custom_filename or getattr(self, "_last_title", url)
         self._download_panel.set_job_title(job_id, title)
 
         # Kick off the queue if it's currently idle
@@ -295,7 +309,19 @@ class AppWindow(ctk.CTk):
         if not url:
             return
         fmt = self._quality_panel.get_selected_format()
-        self._add_to_queue(url, fmt, False)
+        custom_filename = self._url_panel.get_custom_filename()
+
+        overwrite = False
+        if custom_filename:
+            output_dir = self._quality_panel.get_output_dir()
+            if find_conflicts(output_dir, custom_filename):
+                if self._url_panel.overwrite_approved():
+                    overwrite = True
+                else:
+                    # Never silently overwrite: auto-number instead.
+                    custom_filename = unique_path(output_dir, custom_filename, "").stem
+
+        self._add_to_queue(url, fmt, False, custom_filename, overwrite)
 
     # Header actions #
 

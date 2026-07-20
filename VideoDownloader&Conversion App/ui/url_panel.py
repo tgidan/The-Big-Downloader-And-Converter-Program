@@ -5,8 +5,10 @@ URL input panel — entry field, clipboard paste, async format fetch,
 and a preview card showing thumbnail + title + metadata.
 
 Public API:
-URLPanel(master, on_formats_fetched)
-URLPanel.get_url() -> str   – current entry text, stripped
+URLPanel(master, on_formats_fetched, get_output_dir=None)
+URLPanel.get_url() -> str                      – current entry text, stripped
+URLPanel.get_custom_filename() -> str | None    – sanitized filename, or None
+URLPanel.overwrite_approved() -> bool           – user explicitly approved an overwrite
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from typing import Callable
 import customtkinter as ctk
 
 from core.downloader import fetch_info
+from core.utils import find_conflicts, sanitize_filename, unique_path
 
 # Accent colours #
 _BDX        = ("#791F1F", "#A32D2D")   # button fill  (light, dark)
@@ -28,6 +31,7 @@ _BDX_TEXT   = "#FCEBEB"                # always-light text on bordeaux bg
 _BADGE_FG   = ("#F7C1C1", "#5C1418")   # badge background
 _BADGE_TEXT = ("#791F1F", "#F7C1C1")   # badge text
 _ERR_COLOR  = ("#B91C1C", "#F87171")   # error label text
+_WARN_COLOR = ("#92400E", "#FBBF24")   # conflict-warning label text
 
 _SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
@@ -37,6 +41,10 @@ URL entry row + format-fetch trigger + video preview card.
 
 master              parent widget
 on_formats_fetched  callback: (url, formats, info) -> None — fired on main thread
+get_output_dir      callback: () -> str returning the target download folder,
+                    used for filename conflict detection. If None, conflict
+                    checking is skipped entirely (keeps URLPanel independently
+                    constructible in tests).
 """
 class URLPanel(ctk.CTkFrame):
 
@@ -44,14 +52,17 @@ class URLPanel(ctk.CTkFrame):
         self,
         master,
         on_formats_fetched: Callable[[str, list[dict], dict], None],
+        get_output_dir: Callable[[], str] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(master, fg_color="transparent", **kwargs)
-        self._callback    = on_formats_fetched
-        self._fetching    = False
-        self._thumb_ref   = None   # keep CTkImage alive (prevent GC)
-        self._spinner_idx = 0
-        self._spinner_job = None
+        self._callback        = on_formats_fetched
+        self._get_output_dir  = get_output_dir
+        self._fetching        = False
+        self._thumb_ref       = None   # keep CTkImage alive (prevent GC)
+        self._spinner_idx     = 0
+        self._spinner_job     = None
+        self._allow_overwrite = False
 
         self._build()
 
@@ -106,6 +117,65 @@ class URLPanel(ctk.CTkFrame):
             font=ctk.CTkFont(size=12),
             command=self._paste_clipboard,
         ).grid(row=0, column=2)
+
+        # Filename section label (hidden until a fetch succeeds)
+        self._filename_lbl = ctk.CTkLabel(
+            self,
+            text="FILENAME",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=("gray40", "gray55"),
+            anchor="w",
+        )
+        # Not packed initially; shown in _on_fetch_ok().
+
+        # Filename entry (hidden until a fetch succeeds)
+        self._filename_entry = ctk.CTkEntry(
+            self,
+            placeholder_text="Filename (extension added automatically)",
+            height=36,
+        )
+        self._filename_entry.bind("<KeyRelease>", self._on_filename_edit)
+        self._filename_entry.bind("<FocusOut>", self._check_conflict)
+        # Not packed initially; shown in _on_fetch_ok().
+
+        # Filename conflict warning (hidden until a collision is detected)
+        self._warning_row = ctk.CTkFrame(self, fg_color="transparent")
+        # Not packed initially; shown in _check_conflict().
+
+        self._warning_lbl = ctk.CTkLabel(
+            self._warning_row,
+            text="",
+            font=ctk.CTkFont(size=11),
+            text_color=_WARN_COLOR,
+            anchor="w",
+            wraplength=280,
+            justify="left",
+        )
+        self._warning_lbl.pack(side="left", fill="x", expand=True)
+
+        _warn_btn_kw = dict(
+            width=90,
+            height=24,
+            fg_color="transparent",
+            border_width=1,
+            border_color=("gray70", "gray40"),
+            text_color=("gray40", "gray60"),
+            hover_color=("gray90", "gray20"),
+            font=ctk.CTkFont(size=11),
+        )
+        ctk.CTkButton(
+            self._warning_row,
+            text="Auto-number",
+            command=self._auto_number,
+            **_warn_btn_kw,
+        ).pack(side="right", padx=(6, 0))
+
+        ctk.CTkButton(
+            self._warning_row,
+            text="Overwrite",
+            command=self._approve_overwrite,
+            **_warn_btn_kw,
+        ).pack(side="right")
 
         # Loading spinner (hidden until fetch starts)
         self._spinner_lbl = ctk.CTkLabel(
@@ -189,6 +259,15 @@ class URLPanel(ctk.CTkFrame):
     def get_url(self) -> str:
         return self._entry.get().strip()
 
+    """Sanitized custom filename, or None when the field is empty/unfetched."""
+    def get_custom_filename(self) -> str | None:
+        text = self._filename_entry.get().strip()
+        return sanitize_filename(text) if text else None
+
+    """True when the user explicitly approved overwriting an existing file."""
+    def overwrite_approved(self) -> bool:
+        return self._allow_overwrite
+
     # User actions #
 
     def _paste_clipboard(self) -> None:
@@ -219,6 +298,49 @@ class URLPanel(ctk.CTkFrame):
             name="tbdc-fetch",
         ).start()
 
+    # Conflict detection #
+
+    """Reset overwrite approval on every edit, then re-check for a conflict."""
+    def _on_filename_edit(self, _event=None) -> None:
+        self._allow_overwrite = False
+        self._check_conflict()
+
+    """
+    Show or hide the conflict warning for the current filename entry text.
+    No-op if get_output_dir was not supplied (conflict checking disabled).
+    """
+    def _check_conflict(self, _event=None) -> None:
+        if not self._get_output_dir:
+            return
+        if self._allow_overwrite:
+            self._warning_row.pack_forget()
+            return
+
+        text = self._filename_entry.get().strip()
+        if not text:
+            self._warning_row.pack_forget()
+            return
+
+        name = sanitize_filename(text)
+        if find_conflicts(self._get_output_dir(), name):
+            self._warning_lbl.configure(text=f"A file named '{name}' already exists.")
+            self._warning_row.pack(fill="x", pady=(0, 8))
+        else:
+            self._warning_row.pack_forget()
+
+    """Approve overwriting the existing file and hide the warning."""
+    def _approve_overwrite(self) -> None:
+        self._allow_overwrite = True
+        self._warning_row.pack_forget()
+
+    """Replace the entry text with a non-colliding auto-numbered name."""
+    def _auto_number(self) -> None:
+        name = sanitize_filename(self._filename_entry.get())
+        unique = unique_path(self._get_output_dir(), name, "")
+        self._filename_entry.delete(0, tk.END)
+        self._filename_entry.insert(0, unique.stem)
+        self._warning_row.pack_forget()
+
     # Loading indicator #
 
     def _spinner_start(self) -> None:
@@ -244,6 +366,10 @@ class URLPanel(ctk.CTkFrame):
     def _clear_results(self) -> None:
         self._card.pack_forget()
         self._error_lbl.pack_forget()
+        self._filename_lbl.pack_forget()
+        self._filename_entry.pack_forget()
+        self._warning_row.pack_forget()
+        self._allow_overwrite = False
 
     # Background thread #
 
@@ -271,6 +397,15 @@ class URLPanel(ctk.CTkFrame):
         source   = info.get("extractor_key", "")
 
         meta_parts = [p for p in [source, uploader, dur_str] if p]
+
+        # Filename field — overwrite unconditionally so a previous video's
+        # custom name never carries over to this one.
+        self._filename_entry.delete(0, tk.END)
+        self._filename_entry.insert(0, sanitize_filename(info.get("title", "")))
+        self._allow_overwrite = False
+        self._filename_lbl.pack(anchor="w", pady=(0, 6))
+        self._filename_entry.pack(fill="x", pady=(0, 8))
+        self._check_conflict()
 
         self._title_lbl.configure(text=title)
         self._meta_lbl.configure(text=" · ".join(meta_parts))
