@@ -9,6 +9,12 @@ via self.after(0, ...), matching the pattern in ui/app_window.py. Resolution
 comes from ffprobe via core.library_manager and renders as "—" when ffprobe
 is unavailable, never as an error.
 
+List / thumbnail view is a toggle in the toolbar, persisted via
+config_manager's "library_view_mode" key. Thumbnails are extracted by
+core.library_manager (ffmpeg, cached under ~/.tbdc/) and populate the grid
+progressively; a generic placeholder is shown until each one is ready, or
+permanently if ffmpeg is unavailable.
+
 Public API:
 LibraryPanel(master)
 """
@@ -39,6 +45,14 @@ _ROW_HOVER    = ("gray90", "gray20")
 _ROW_SELECTED = ("gray85", "gray28")
 _NAME_MAX     = 18   # chars before truncation in the video-list name column
 
+_VIEW_LIST       = "list"
+_VIEW_THUMBNAILS = "thumbnails"
+_VIEW_LABELS     = {_VIEW_LIST: "List", _VIEW_THUMBNAILS: "Thumbnails"}
+_VIEW_MODES      = {label: mode for mode, label in _VIEW_LABELS.items()}
+
+_THUMB_SIZE      = (160, 90)   # matches core.library_manager's extraction width
+_THUMB_CARD_SLOT = 192         # approx. card width (thumbnail + padding), used to fit columns to the pane width
+
 
 """Format a byte count as a short human-readable string, e.g. '142.3 MB'."""
 def _format_size(size_bytes: int) -> str:
@@ -48,6 +62,23 @@ def _format_size(size_bytes: int) -> str:
             return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
         size /= 1024
     return f"{size:.1f} GB"
+
+
+"""Build a generic dark placeholder frame with a play-triangle glyph, drawn
+procedurally so no image asset is needed (Pillow is a soft dependency here,
+matching ui/url_panel.py's _load_thumb)."""
+def _make_placeholder_image():
+    from PIL import Image, ImageDraw  # soft dependency
+
+    w, h = _THUMB_SIZE
+    img = Image.new("RGB", (w, h), (45, 45, 48))
+    draw = ImageDraw.Draw(img)
+    cx, cy, r = w // 2, h // 2, min(w, h) // 4
+    draw.polygon(
+        [(cx - r // 2, cy - r), (cx - r // 2, cy + r), (cx + r, cy)],
+        fill=(90, 90, 95),
+    )
+    return img
 
 
 """Open `path` with the OS's default handler for its file type."""
@@ -75,6 +106,16 @@ class LibraryPanel(ctk.CTkToplevel):
 
         self._search_query: str = ""       # "" means no active search
         self._search_after_id: str | None = None
+
+        stored_mode = config_manager.get("library_view_mode", _VIEW_LIST)
+        self._view_mode = stored_mode if stored_mode in _VIEW_LABELS else _VIEW_LIST
+        self._thumb_refs: dict[str, ctk.CTkImage] = {}        # keep alive — Tk drops GC'd images
+        self._thumb_card_labels: dict[str, ctk.CTkLabel] = {}
+        self._thumb_cards: list[ctk.CTkFrame] = []            # positioned by _layout_thumbnail_grid
+        self._placeholder_thumb: ctk.CTkImage | None = None
+        self._last_videos: list[lm.VideoFile] = []
+        self._last_empty_text: str = ""
+        self._last_show_folder: bool = False
 
         self.title("Library")
         self.geometry("760x520")
@@ -124,6 +165,15 @@ class LibraryPanel(ctk.CTkToplevel):
         self._search_entry.pack(side="left", fill="x", expand=True, padx=(10, 0))
         self._search_entry.bind("<KeyRelease>", self._on_search_key)
 
+        self._view_toggle = ctk.CTkSegmentedButton(
+            bar,
+            values=[_VIEW_LABELS[_VIEW_LIST], _VIEW_LABELS[_VIEW_THUMBNAILS]],
+            font=ctk.CTkFont(size=12),
+            command=self._on_view_mode_changed,
+        )
+        self._view_toggle.set(_VIEW_LABELS[self._view_mode])
+        self._view_toggle.pack(side="left", padx=(10, 0))
+
     """Left pane: scrollable hand-rolled folder tree (no ttk.Treeview — see Prompt 2.1)."""
     def _build_tree_pane(self, parent) -> None:
         self._tree_scroll = ctk.CTkScrollableFrame(
@@ -141,18 +191,19 @@ class LibraryPanel(ctk.CTkToplevel):
         container.rowconfigure(1, weight=1)
         container.columnconfigure(0, weight=1)
 
-        header = ctk.CTkFrame(container, fg_color=("gray90", "gray17"), height=28)
-        header.grid(row=0, column=0, sticky="ew")
-        header.grid_propagate(False)
-        header.columnconfigure(0, weight=1)
+        self._video_header = ctk.CTkFrame(container, fg_color=("gray90", "gray17"), height=28)
+        self._video_header.grid(row=0, column=0, sticky="ew")
+        self._video_header.grid_propagate(False)
+        self._video_header.columnconfigure(0, weight=1)
 
         col_kw = dict(font=ctk.CTkFont(size=11, weight="bold"), text_color=("gray40", "gray60"))
-        ctk.CTkLabel(header, text="Name", anchor="w", **col_kw).grid(row=0, column=0, sticky="ew", padx=(10, 0))
-        ctk.CTkLabel(header, text="Resolution", width=90, anchor="w", **col_kw).grid(row=0, column=1)
-        ctk.CTkLabel(header, text="Size", width=80, anchor="w", **col_kw).grid(row=0, column=2, padx=(0, 10))
+        ctk.CTkLabel(self._video_header, text="Name", anchor="w", **col_kw).grid(row=0, column=0, sticky="ew", padx=(10, 0))
+        ctk.CTkLabel(self._video_header, text="Resolution", width=90, anchor="w", **col_kw).grid(row=0, column=1)
+        ctk.CTkLabel(self._video_header, text="Size", width=80, anchor="w", **col_kw).grid(row=0, column=2, padx=(0, 10))
 
         self._video_scroll = ctk.CTkScrollableFrame(container, fg_color="transparent")
         self._video_scroll.grid(row=1, column=0, sticky="nsew")
+        self._video_scroll.bind("<Configure>", self._on_video_pane_resize)
 
     """Thin status/loading-indicator row at the bottom of the window."""
     def _build_statusbar(self) -> None:
@@ -240,11 +291,9 @@ class LibraryPanel(ctk.CTkToplevel):
         self._current_dir = path
         videos = lm.list_videos(path)
         self._render_videos(videos)
-        self._start_metadata_scan(
-            videos,
-            is_stale=lambda p=path: p != self._current_dir or bool(self._search_query),
-            render=self._render_videos,
-        )
+        is_stale = lambda p=path: p != self._current_dir or bool(self._search_query)
+        self._start_metadata_scan(videos, is_stale=is_stale, render=self._render_videos)
+        self._start_thumbnail_scan(videos, is_stale=is_stale)
 
     # New Folder #
 
@@ -290,10 +339,27 @@ class LibraryPanel(ctk.CTkToplevel):
     def _render_search_results(self, videos: list[lm.VideoFile]) -> None:
         self._render_video_rows(videos, "No matches", show_folder=True)
 
-    """Shared renderer behind _render_videos / _render_search_results."""
+    """
+    Shared renderer behind _render_videos / _render_search_results. Also the
+    re-render target when the list/thumbnail toggle changes, so it caches
+    its last arguments for _on_view_mode_changed to replay.
+    """
     def _render_video_rows(self, videos: list[lm.VideoFile], empty_text: str, *, show_folder: bool) -> None:
+        self._last_videos      = videos
+        self._last_empty_text  = empty_text
+        self._last_show_folder = show_folder
+
         for child in self._video_scroll.winfo_children():
             child.destroy()
+        self._thumb_refs.clear()
+        self._thumb_card_labels.clear()
+        self._thumb_cards = []
+
+        is_thumbnails = self._view_mode == _VIEW_THUMBNAILS
+        if is_thumbnails:
+            self._video_header.grid_remove()
+        else:
+            self._video_header.grid()
 
         if not videos:
             ctk.CTkLabel(
@@ -304,8 +370,13 @@ class LibraryPanel(ctk.CTkToplevel):
             ).pack(pady=20)
             return
 
-        for video in videos:
-            self._add_video_row(video, show_folder=show_folder)
+        if is_thumbnails:
+            for video in videos:
+                self._thumb_cards.append(self._add_thumbnail_card(video, show_folder=show_folder))
+            self._layout_thumbnail_grid()
+        else:
+            for video in videos:
+                self._add_video_row(video, show_folder=show_folder)
 
     """Return a display string for the folder containing `video`, relative to the root."""
     def _folder_label(self, video: lm.VideoFile) -> str:
@@ -362,6 +433,68 @@ class LibraryPanel(ctk.CTkToplevel):
             widget.bind("<Double-Button-1>", lambda _e, v=video: _open_with_default_app(v.path))
             widget.bind("<Button-3>", lambda e, v=video: self._show_context_menu(e, v))
 
+    """Lazily build (once) and return the shared placeholder CTkImage."""
+    def _placeholder_image(self) -> ctk.CTkImage:
+        if self._placeholder_thumb is None:
+            self._placeholder_thumb = ctk.CTkImage(_make_placeholder_image(), size=_THUMB_SIZE)
+        return self._placeholder_thumb
+
+    """
+    Build one thumbnail-grid card: placeholder (or cached) image, filename,
+    folder. Not placed in the grid yet — _layout_thumbnail_grid positions
+    every card at once, sized to the pane's current width.
+    """
+    def _add_thumbnail_card(self, video: lm.VideoFile, *, show_folder: bool = False) -> ctk.CTkFrame:
+        card = ctk.CTkFrame(self._video_scroll, fg_color=("gray92", "gray17"), corner_radius=8)
+
+        img_lbl = ctk.CTkLabel(card, text="", image=self._placeholder_image())
+        img_lbl.pack(padx=8, pady=(8, 4))
+        self._thumb_card_labels[video.path] = img_lbl
+
+        display_name = video.name[:_NAME_MAX] + "…" if len(video.name) > _NAME_MAX else video.name
+        name_lbl = ctk.CTkLabel(card, text=display_name, font=ctk.CTkFont(size=12))
+        name_lbl.pack(padx=8, pady=(0, 8 if not show_folder else 0))
+
+        bind_targets = [card, img_lbl, name_lbl]
+        if show_folder:
+            folder_lbl = ctk.CTkLabel(
+                card, text=self._folder_label(video),
+                font=ctk.CTkFont(size=10), text_color=("gray50", "gray55"),
+            )
+            folder_lbl.pack(padx=8, pady=(0, 8))
+            bind_targets.append(folder_lbl)
+
+        for widget in bind_targets:
+            widget.bind("<Double-Button-1>", lambda _e, v=video: _open_with_default_app(v.path))
+            widget.bind("<Button-3>", lambda e, v=video: self._show_context_menu(e, v))
+
+        return card
+
+    """
+    Return how many card columns fit in the pane's current width, so cards
+    wrap into more rows instead of being clipped off the right edge (the
+    pane only scrolls vertically). Falls back to 1 before the pane has been
+    laid out at all.
+    """
+    def _thumbnail_columns(self) -> int:
+        available = self._video_scroll.winfo_width() - 24  # allow for the scrollbar
+        return max(1, available // _THUMB_CARD_SLOT)
+
+    """(Re)position every built thumbnail card into a grid sized to the pane's current width."""
+    def _layout_thumbnail_grid(self) -> None:
+        if not self._thumb_cards:
+            return
+        cols = self._thumbnail_columns()
+        for col in range(cols):
+            self._video_scroll.columnconfigure(col, weight=1)
+        for idx, card in enumerate(self._thumb_cards):
+            card.grid(row=idx // cols, column=idx % cols, padx=8, pady=8, sticky="n")
+
+    """Re-flow the thumbnail grid when the pane is resized; a no-op in list view."""
+    def _on_video_pane_resize(self, _event=None) -> None:
+        if self._view_mode == _VIEW_THUMBNAILS:
+            self._layout_thumbnail_grid()
+
     """
     Fill in resolution/duration for `videos` on a daemon thread, then
     re-render via `render` — unless `is_stale()` says the view has since
@@ -407,6 +540,64 @@ class LibraryPanel(ctk.CTkToplevel):
             return
         render(videos)
 
+    # Thumbnails #
+
+    """
+    Extract (or fetch from cache) a thumbnail per video on a daemon thread,
+    updating each card as its thumbnail becomes ready rather than waiting
+    for the whole batch — a no-op unless thumbnail view is active.
+    """
+    def _start_thumbnail_scan(self, videos: list[lm.VideoFile], *, is_stale: Callable[[], bool]) -> None:
+        if self._view_mode != _VIEW_THUMBNAILS or not videos:
+            return
+        threading.Thread(
+            target=self._thumbnail_scan_thread,
+            args=(videos, is_stale),
+            daemon=True,
+            name="tbdc-library-thumbnails",
+        ).start()
+
+    """Extract each thumbnail off the UI thread, marshalling one update per file."""
+    def _thumbnail_scan_thread(self, videos: list[lm.VideoFile], is_stale: Callable[[], bool]) -> None:
+        ffmpeg_path = config_manager.get("ffmpeg_path")
+        for video in videos:
+            thumb_path = lm.extract_thumbnail(video, ffmpeg_path)
+            if thumb_path:
+                self.after(0, lambda p=video.path, tp=thumb_path: self._on_thumbnail_ready(p, tp, is_stale))
+
+    """UI thread: swap one card's placeholder for its real thumbnail, unless stale."""
+    def _on_thumbnail_ready(self, video_path: str, thumb_path: str, is_stale: Callable[[], bool]) -> None:
+        if is_stale():
+            return
+        label = self._thumb_card_labels.get(video_path)
+        if label is None or not label.winfo_exists():
+            return
+
+        try:
+            from PIL import Image  # soft dependency, matches ui/url_panel.py
+
+            img = Image.open(thumb_path)
+            ctk_img = ctk.CTkImage(img, size=_THUMB_SIZE)
+        except Exception:
+            return
+
+        self._thumb_refs[video_path] = ctk_img   # keep alive — prevents GC blanking the image
+        label.configure(image=ctk_img, text="")
+
+    # View mode #
+
+    """Toggle between list and thumbnail view, persist the choice, and re-render."""
+    def _on_view_mode_changed(self, label: str) -> None:
+        mode = _VIEW_MODES.get(label, _VIEW_LIST)
+        if mode == self._view_mode:
+            return
+        self._view_mode = mode
+        config_manager.set("library_view_mode", mode)
+
+        videos = self._last_videos
+        self._render_video_rows(videos, self._last_empty_text, show_folder=self._last_show_folder)
+        self._start_thumbnail_scan(videos, is_stale=lambda snapshot=videos: snapshot is not self._last_videos)
+
     # Search #
 
     """Debounce keystrokes: reschedule the actual search 300 ms after the last one."""
@@ -448,11 +639,9 @@ class LibraryPanel(ctk.CTkToplevel):
             return  # user kept typing, or cleared the field, before this returned
         self._status_lbl.configure(text="")
         self._render_search_results(results)
-        self._start_metadata_scan(
-            results,
-            is_stale=lambda q=query: q != self._search_query,
-            render=self._render_search_results,
-        )
+        is_stale = lambda q=query: q != self._search_query
+        self._start_metadata_scan(results, is_stale=is_stale, render=self._render_search_results)
+        self._start_thumbnail_scan(results, is_stale=is_stale)
 
     # Context menu #
 
