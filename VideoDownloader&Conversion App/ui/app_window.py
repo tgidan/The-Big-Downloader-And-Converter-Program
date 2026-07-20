@@ -342,7 +342,7 @@ class AppWindow(ctk.CTk):
     """Open the LibraryPanel window."""
     def _open_library(self) -> None:
         from ui.library_panel import LibraryPanel
-        LibraryPanel(self)
+        LibraryPanel(self, on_folder_created=self._quality_panel.refresh_destination_options)
 
     """Re-run startup checks on a background thread after settings are saved."""
     def _on_settings_saved(self) -> None:

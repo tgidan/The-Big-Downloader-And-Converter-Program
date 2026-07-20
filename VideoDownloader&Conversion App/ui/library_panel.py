@@ -16,7 +16,7 @@ progressively; a generic placeholder is shown until each one is ready, or
 permanently if ffmpeg is unavailable.
 
 Public API:
-LibraryPanel(master)
+LibraryPanel(master, on_folder_created=None)
 """
 
 from __future__ import annotations
@@ -94,9 +94,17 @@ def _open_with_default_app(path: str) -> None:
 """Library browser window: folder tree (left) + video list (right)."""
 class LibraryPanel(ctk.CTkToplevel):
 
-    """Open non-modally, build the layout, and kick off the initial scan."""
-    def __init__(self, master) -> None:
+    """
+    Open non-modally, build the layout, and kick off the initial scan.
+
+    on_folder_created  callback: () -> None, fired after a folder is
+                        successfully created via the toolbar button — lets
+                        callers (e.g. QualityPanel's destination dropdown)
+                        refresh their own view of the folder tree.
+    """
+    def __init__(self, master, on_folder_created: Callable[[], None] | None = None) -> None:
         super().__init__(master)
+        self._on_folder_created = on_folder_created
         self._root_dir    = config_manager.get("output_dir") or str(Path.home())
         self._current_dir = self._root_dir
 
@@ -325,6 +333,8 @@ class LibraryPanel(ctk.CTkToplevel):
             return
 
         self._start_tree_scan(select_path=str(new_dir))
+        if self._on_folder_created:
+            self._on_folder_created()
 
     # Video list #
 
