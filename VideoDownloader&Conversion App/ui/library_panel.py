@@ -21,11 +21,13 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
+from tkinter import messagebox, simpledialog
 from typing import Callable
 
 import customtkinter as ctk
 
 from core import config_manager, library_manager as lm
+from core.utils import sanitize_filename
 
 # Colours: match app_window.py / settings_panel.py palette #
 _BDX       = "#791F1F"
@@ -71,6 +73,9 @@ class LibraryPanel(ctk.CTkToplevel):
         self._selected_tree_row: ctk.CTkFrame | None = None
         self._context_menu: tk.Menu | None = None
 
+        self._search_query: str = ""       # "" means no active search
+        self._search_after_id: str | None = None
+
         self.title("Library")
         self.geometry("760x520")
         self.minsize(560, 360)
@@ -95,7 +100,7 @@ class LibraryPanel(ctk.CTkToplevel):
 
         self._build_statusbar()
 
-    """Toolbar with New Folder / search placeholders (wired up in a later commit)."""
+    """Toolbar with the New Folder button and the cross-folder search field."""
     def _build_toolbar(self) -> None:
         bar = ctk.CTkFrame(self, fg_color="transparent")
         bar.pack(fill="x", padx=12, pady=12)
@@ -108,16 +113,16 @@ class LibraryPanel(ctk.CTkToplevel):
             hover_color=(_BDX_HOVER, "#C44040"),
             text_color=_BDX_TEXT,
             font=ctk.CTkFont(size=12, weight="bold"),
-            state="disabled",
+            command=self._prompt_new_folder,
         ).pack(side="left")
 
         self._search_entry = ctk.CTkEntry(
             bar,
-            placeholder_text="Search library… (coming soon)",
+            placeholder_text="Search library…",
             font=ctk.CTkFont(size=12),
-            state="disabled",
         )
         self._search_entry.pack(side="left", fill="x", expand=True, padx=(10, 0))
+        self._search_entry.bind("<KeyRelease>", self._on_search_key)
 
     """Left pane: scrollable hand-rolled folder tree (no ttk.Treeview — see Prompt 2.1)."""
     def _build_tree_pane(self, parent) -> None:
@@ -162,25 +167,30 @@ class LibraryPanel(ctk.CTkToplevel):
 
     # Tree scan (initial + refresh) #
 
-    """Show a loading status and scan the root directory on a daemon thread."""
-    def _start_tree_scan(self) -> None:
+    """Show a loading status and scan the root directory on a daemon thread.
+
+    `select_path` is highlighted once the scan completes; the root is
+    selected by default, which covers both the initial load and a refresh
+    after a folder is created without one.
+    """
+    def _start_tree_scan(self, select_path: str | None = None) -> None:
         self._status_lbl.configure(text="Scanning library…")
         threading.Thread(
-            target=self._tree_scan_thread,
+            target=lambda: self._tree_scan_thread(select_path),
             daemon=True,
             name="tbdc-library-scan",
         ).start()
 
     """Runs off the UI thread: build the directory tree, then marshal back."""
-    def _tree_scan_thread(self) -> None:
+    def _tree_scan_thread(self, select_path: str | None) -> None:
         tree = lm.get_directory_tree(self._root_dir)
-        self.after(0, lambda: self._on_tree_scanned(tree))
+        self.after(0, lambda: self._on_tree_scanned(tree, select_path))
 
-    """UI thread: render the tree, clear the loading status, select the root."""
-    def _on_tree_scanned(self, tree: lm.DirectoryNode) -> None:
+    """UI thread: render the tree, clear the loading status, select a folder."""
+    def _on_tree_scanned(self, tree: lm.DirectoryNode, select_path: str | None = None) -> None:
         self._status_lbl.configure(text="")
         self._render_tree(tree)
-        self._select_folder(self._root_dir)
+        self._select_folder(select_path or self._root_dir)
 
     """Clear and rebuild the tree pane from a DirectoryNode, flattened with indentation."""
     def _render_tree(self, tree: lm.DirectoryNode) -> None:
@@ -230,39 +240,104 @@ class LibraryPanel(ctk.CTkToplevel):
         self._current_dir = path
         videos = lm.list_videos(path)
         self._render_videos(videos)
-        self._start_metadata_scan(path, videos)
+        self._start_metadata_scan(
+            videos,
+            is_stale=lambda p=path: p != self._current_dir or bool(self._search_query),
+            render=self._render_videos,
+        )
+
+    # New Folder #
+
+    """
+    Prompt for a name, create it under the currently selected folder (root
+    if nothing is selected), and refresh the tree selecting the new folder.
+    Shows a message box rather than failing silently on error — including a
+    name collision, which create_subfolder() itself treats as a no-op since
+    it's built on mkdir(exist_ok=True).
+    """
+    def _prompt_new_folder(self) -> None:
+        name = simpledialog.askstring("New Folder", "Folder name:", parent=self)
+        if not name:
+            return
+
+        target = Path(self._current_dir) / sanitize_filename(name)
+        if target.is_dir():
+            messagebox.showerror(
+                "Couldn't create folder",
+                f"A folder named '{target.name}' already exists here.",
+                parent=self,
+            )
+            return
+
+        try:
+            new_dir = lm.create_subfolder(self._root_dir, self._current_dir, name)
+        except (ValueError, OSError) as exc:
+            messagebox.showerror("Couldn't create folder", str(exc), parent=self)
+            return
+
+        self._start_tree_scan(select_path=str(new_dir))
 
     # Video list #
 
     """Clear and rebuild the video list pane from a list of VideoFile records."""
     def _render_videos(self, videos: list[lm.VideoFile]) -> None:
+        self._render_video_rows(videos, "No videos in this folder", show_folder=False)
+
+    """
+    Clear and rebuild the video list pane as cross-folder search results.
+    Each row shows its containing folder, since results span folders.
+    """
+    def _render_search_results(self, videos: list[lm.VideoFile]) -> None:
+        self._render_video_rows(videos, "No matches", show_folder=True)
+
+    """Shared renderer behind _render_videos / _render_search_results."""
+    def _render_video_rows(self, videos: list[lm.VideoFile], empty_text: str, *, show_folder: bool) -> None:
         for child in self._video_scroll.winfo_children():
             child.destroy()
 
         if not videos:
             ctk.CTkLabel(
                 self._video_scroll,
-                text="No videos in this folder",
+                text=empty_text,
                 font=ctk.CTkFont(size=12),
                 text_color=("gray50", "gray55"),
             ).pack(pady=20)
             return
 
         for video in videos:
-            self._add_video_row(video)
+            self._add_video_row(video, show_folder=show_folder)
 
-    """Add one video row: name / resolution / size, Open button, dbl-click and right-click."""
-    def _add_video_row(self, video: lm.VideoFile) -> None:
+    """Return a display string for the folder containing `video`, relative to the root."""
+    def _folder_label(self, video: lm.VideoFile) -> str:
+        folder = str(Path(video.path).parent)
+        if folder == self._root_dir:
+            return "(root)"
+        return str(Path(folder).relative_to(self._root_dir))
+
+    """Add one video row: name (+ folder, if show_folder) / resolution / size / Open button."""
+    def _add_video_row(self, video: lm.VideoFile, *, show_folder: bool = False) -> None:
         row = ctk.CTkFrame(self._video_scroll, fg_color="transparent")
         row.pack(fill="x", pady=1)
         row.columnconfigure(0, weight=1)
 
+        name_cell = ctk.CTkFrame(row, fg_color="transparent")
+        name_cell.grid(row=0, column=0, sticky="ew", padx=(10, 10))
+
         display_name = video.name[:_NAME_MAX] + "…" if len(video.name) > _NAME_MAX else video.name
         name_lbl = ctk.CTkLabel(
-            row, text=display_name, anchor="w", width=1,
+            name_cell, text=display_name, anchor="w", width=1,
             font=ctk.CTkFont(size=12),
         )
-        name_lbl.grid(row=0, column=0, sticky="ew", padx=(10, 10))
+        name_lbl.pack(fill="x")
+
+        bind_targets = [row, name_cell, name_lbl]
+        if show_folder:
+            folder_lbl = ctk.CTkLabel(
+                name_cell, text=self._folder_label(video), anchor="w", width=1,
+                font=ctk.CTkFont(size=10), text_color=("gray50", "gray55"),
+            )
+            folder_lbl.pack(fill="x")
+            bind_targets.append(folder_lbl)
 
         ctk.CTkLabel(
             row, text=video.resolution or "—", width=90, anchor="w",
@@ -283,33 +358,101 @@ class LibraryPanel(ctk.CTkToplevel):
             command=lambda: _open_with_default_app(video.path),
         ).grid(row=0, column=3, padx=(6, 10))
 
-        for widget in (row, name_lbl):
+        for widget in bind_targets:
             widget.bind("<Double-Button-1>", lambda _e, v=video: _open_with_default_app(v.path))
             widget.bind("<Button-3>", lambda e, v=video: self._show_context_menu(e, v))
 
-    """Runs on a daemon thread: fill in resolution/duration, then marshal back if still relevant."""
-    def _start_metadata_scan(self, path: str, videos: list[lm.VideoFile]) -> None:
+    """
+    Fill in resolution/duration for `videos` on a daemon thread, then
+    re-render via `render` — unless `is_stale()` says the view has since
+    moved on (folder changed, or a search started/changed/cleared).
+    Shared by the per-folder view and cross-folder search results.
+    """
+    def _start_metadata_scan(
+        self,
+        videos: list[lm.VideoFile],
+        *,
+        is_stale: Callable[[], bool],
+        render: Callable[[list[lm.VideoFile]], None],
+    ) -> None:
         if not videos:
             return
         threading.Thread(
             target=self._metadata_scan_thread,
-            args=(path, videos),
+            args=(videos, is_stale, render),
             daemon=True,
             name="tbdc-library-metadata",
         ).start()
 
     """Fill metadata for every video in `videos`, off the UI thread."""
-    def _metadata_scan_thread(self, path: str, videos: list[lm.VideoFile]) -> None:
+    def _metadata_scan_thread(
+        self,
+        videos: list[lm.VideoFile],
+        is_stale: Callable[[], bool],
+        render: Callable[[list[lm.VideoFile]], None],
+    ) -> None:
         ffmpeg_path = config_manager.get("ffmpeg_path")
         for video in videos:
             lm.fill_metadata(video, ffmpeg_path)
-        self.after(0, lambda: self._on_metadata_scanned(path, videos))
+        self.after(0, lambda: self._on_metadata_scanned(videos, is_stale, render))
 
-    """UI thread: re-render the video list, unless the user has since selected another folder."""
-    def _on_metadata_scanned(self, path: str, videos: list[lm.VideoFile]) -> None:
-        if path != self._current_dir:
+    """UI thread: re-render, unless the view has since moved on."""
+    def _on_metadata_scanned(
+        self,
+        videos: list[lm.VideoFile],
+        is_stale: Callable[[], bool],
+        render: Callable[[list[lm.VideoFile]], None],
+    ) -> None:
+        if is_stale():
             return
-        self._render_videos(videos)
+        render(videos)
+
+    # Search #
+
+    """Debounce keystrokes: reschedule the actual search 300 ms after the last one."""
+    def _on_search_key(self, _event=None) -> None:
+        if self._search_after_id is not None:
+            self.after_cancel(self._search_after_id)
+        query = self._search_entry.get().strip()
+        self._search_after_id = self.after(300, lambda: self._run_search(query))
+
+    """
+    Run (or clear) the search. An empty query restores the normal
+    selected-folder view; otherwise scan the whole tree on a daemon thread.
+    """
+    def _run_search(self, query: str) -> None:
+        self._search_after_id = None
+        self._search_query = query
+
+        if not query:
+            self._status_lbl.configure(text="")
+            self._select_folder(self._current_dir)
+            return
+
+        self._status_lbl.configure(text=f"Searching for '{query}'…")
+        threading.Thread(
+            target=self._search_thread,
+            args=(query,),
+            daemon=True,
+            name="tbdc-library-search",
+        ).start()
+
+    """Runs off the UI thread: recursive, case-insensitive filename search."""
+    def _search_thread(self, query: str) -> None:
+        results = lm.search_videos(self._root_dir, query)
+        self.after(0, lambda: self._on_search_done(query, results))
+
+    """UI thread: render results and kick off metadata fill-in, unless superseded."""
+    def _on_search_done(self, query: str, results: list[lm.VideoFile]) -> None:
+        if query != self._search_query:
+            return  # user kept typing, or cleared the field, before this returned
+        self._status_lbl.configure(text="")
+        self._render_search_results(results)
+        self._start_metadata_scan(
+            results,
+            is_stale=lambda q=query: q != self._search_query,
+            render=self._render_search_results,
+        )
 
     # Context menu #
 
