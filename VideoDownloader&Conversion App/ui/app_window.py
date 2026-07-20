@@ -127,6 +127,11 @@ class AppWindow(ctk.CTk):
             command=self._open_settings,
             **icon_kw,
         ).pack(side="left", padx=4)
+        ctk.CTkButton(
+            icons, text="🎬",
+            command=self._open_library,
+            **icon_kw,
+        ).pack(side="left", padx=4)
 
     """Left scroll pane (URL + Quality), vertical separator, right sidebar (Queue)."""
     def _build_content(self) -> None:
@@ -333,6 +338,11 @@ class AppWindow(ctk.CTk):
     def _open_settings(self) -> None:
         from ui.settings_panel import SettingsPanel
         SettingsPanel(self, on_save=self._on_settings_saved)
+
+    """Open the LibraryPanel window."""
+    def _open_library(self) -> None:
+        from ui.library_panel import LibraryPanel
+        LibraryPanel(self, on_folder_created=self._quality_panel.refresh_destination_options)
 
     """Re-run startup checks on a background thread after settings are saved."""
     def _on_settings_saved(self) -> None:

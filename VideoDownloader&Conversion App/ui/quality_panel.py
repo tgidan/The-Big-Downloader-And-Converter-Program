@@ -7,21 +7,21 @@ Public API:
 QualityPanel(master, on_add_to_queue)
 QualityPanel.populate(url, formats, info)         – rebuild dropdown from fetched formats
 QualityPanel.get_selected_format() -> str         – yt-dlp format string for selection
-QualityPanel.get_output_dir() -> str              – currently chosen output directory
+QualityPanel.get_output_dir() -> str              – currently chosen destination (root or subfolder)
 QualityPanel.open_output_picker()                 – open directory-chooser dialog
+QualityPanel.refresh_destination_options()        – repopulate the subfolder dropdown from disk
 """
 
 from __future__ import annotations
 
 import re
 from collections import defaultdict
-from pathlib import Path
 from tkinter import filedialog
 from typing import Callable
 
 import customtkinter as ctk
 
-from core import config_manager
+from core import config_manager, library_manager as lm
 from core.downloader import build_audio_format_string, build_video_format_string
 
 # Accent colours #
@@ -29,8 +29,8 @@ _BDX       = ("#791F1F", "#A32D2D")
 _BDX_HOVER = ("#5C1418", "#C44040")
 _BDX_TEXT  = "#FCEBEB"
 
-_DEFAULT_OUTPUT = str(Path.home() / "Downloads" / "TBD&C")
 _OUTPUT_DIR_KEY = "output_dir"
+_ROOT_LABEL     = "(root)"
 
 # Container preference order (lower index = higher priority)
 _EXT_ORDER = {"mp4": 0, "webm": 1}
@@ -56,9 +56,12 @@ class QualityPanel(ctk.CTkFrame):
         self._formats: list[dict] = []
         # label -> (yt-dlp format string, audio_only flag)
         self._format_map: dict[str, tuple[str, bool]] = {}
-        self._output_dir = config_manager.get(_OUTPUT_DIR_KEY, _DEFAULT_OUTPUT)
+        self._output_dir = config_manager.get(_OUTPUT_DIR_KEY)
+        self._destination = self._output_dir      # root or a chosen subfolder
+        self._dest_options: dict[str, str] = {}    # label -> full path
 
         self._build()
+        self.refresh_destination_options()
         self._set_state("disabled")
 
     # Public #
@@ -123,13 +126,45 @@ class QualityPanel(ctk.CTkFrame):
         fmt, _ = self._format_map.get(label, (build_video_format_string(1080), False))
         return fmt
 
-    """Return the currently chosen output directory path."""
+    """Return the currently chosen destination — the root, or a chosen subfolder."""
     def get_output_dir(self) -> str:
-        return self._output_dir
+        return self._destination
 
     """Open the output directory dialog (callable from outside the panel)."""
     def open_output_picker(self) -> None:
         self._pick_output_dir()
+
+    """
+    Repopulate the destination dropdown from the subfolders currently on
+    disk under the root. Called after the root changes (Browse) and after
+    a folder is created elsewhere (the library panel). The current
+    selection is kept if it still exists; otherwise falls back to root —
+    which also naturally covers the root-changed case, since a destination
+    under the old root never matches an option under the new one.
+    """
+    def refresh_destination_options(self) -> None:
+        self._dest_options = {_ROOT_LABEL: self._output_dir}
+        tree = lm.get_directory_tree(self._output_dir)
+
+        def _walk(node: lm.DirectoryNode, prefix: str) -> None:
+            for child in node.children:
+                label = f"{prefix}{child.name}"
+                self._dest_options[label] = child.path
+                _walk(child, f"{label}/")
+
+        _walk(tree, "")
+
+        labels = list(self._dest_options.keys())
+        self._dest_menu.configure(values=labels)
+
+        current_label = next(
+            (label for label, path in self._dest_options.items() if path == self._destination),
+            None,
+        )
+        if current_label is None:
+            self._destination = self._output_dir
+            current_label = _ROOT_LABEL
+        self._dest_menu.set(current_label)
 
     # Layout #
 
@@ -224,6 +259,23 @@ class QualityPanel(ctk.CTkFrame):
             command=self._pick_output_dir,
         ).grid(row=0, column=1, sticky="e")
 
+        # Destination subfolder
+        ctk.CTkLabel(
+            self,
+            text="Save to",
+            font=ctk.CTkFont(size=12),
+            text_color=("gray40", "gray60"),
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 4))
+
+        self._dest_menu = ctk.CTkOptionMenu(
+            self,
+            values=[_ROOT_LABEL],
+            command=self._on_destination_selected,
+            dynamic_resizing=False,
+        )
+        self._dest_menu.pack(fill="x", pady=(0, 14))
+
         # Add to queue button
         self._add_btn = ctk.CTkButton(
             self,
@@ -309,8 +361,14 @@ class QualityPanel(ctk.CTkFrame):
         )
         if path:
             self._output_dir = path
+            self._destination = path
             self._dir_lbl.configure(text=path)
             config_manager.set(_OUTPUT_DIR_KEY, path)
+            self.refresh_destination_options()
+
+    """Update the selected destination from the dropdown."""
+    def _on_destination_selected(self, label: str) -> None:
+        self._destination = self._dest_options.get(label, self._output_dir)
 
     # Queue action #
 
