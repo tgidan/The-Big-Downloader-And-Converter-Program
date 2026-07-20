@@ -31,6 +31,7 @@ _DEFAULTS: dict = {
     "loudness_normalization": False,
     "loudness_target_lufs":   -14.0,
     "cookiefile":             None,
+    "library_view_mode":      "list",
 }
 
 # State #

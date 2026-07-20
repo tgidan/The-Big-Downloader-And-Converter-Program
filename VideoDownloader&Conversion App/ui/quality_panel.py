@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from pathlib import Path
 from tkinter import filedialog
 from typing import Callable
 
@@ -29,7 +28,6 @@ _BDX       = ("#791F1F", "#A32D2D")
 _BDX_HOVER = ("#5C1418", "#C44040")
 _BDX_TEXT  = "#FCEBEB"
 
-_DEFAULT_OUTPUT = str(Path.home() / "Downloads" / "TBD&C")
 _OUTPUT_DIR_KEY = "output_dir"
 
 # Container preference order (lower index = higher priority)
@@ -56,7 +54,7 @@ class QualityPanel(ctk.CTkFrame):
         self._formats: list[dict] = []
         # label -> (yt-dlp format string, audio_only flag)
         self._format_map: dict[str, tuple[str, bool]] = {}
-        self._output_dir = config_manager.get(_OUTPUT_DIR_KEY, _DEFAULT_OUTPUT)
+        self._output_dir = config_manager.get(_OUTPUT_DIR_KEY)
 
         self._build()
         self._set_state("disabled")
