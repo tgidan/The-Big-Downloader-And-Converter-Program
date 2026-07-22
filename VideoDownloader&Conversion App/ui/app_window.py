@@ -18,6 +18,8 @@ from __future__ import annotations
 import os
 import shutil
 import threading
+import time
+import tkinter as tk
 from pathlib import Path
 
 import customtkinter as ctk
@@ -39,6 +41,59 @@ _BDX_SUB   = "#E24B4A"   # subtitle / de-emphasised on bordeaux bg
 _WARN_BG    = ("#FEF3C7", "#3D2A00")
 _WARN_TEXT  = ("#92400E", "#FBBF24")
 _WARN_HOVER = ("#FDE68A", "#5C4000")
+
+class _Tooltip:
+    """Hover tooltip that floats above any Tkinter/CTk widget."""
+
+    def __init__(self, widget: tk.Widget) -> None:
+        self._widget = widget
+        self._text = ""
+        self._win: tk.Toplevel | None = None
+        self._tip_lbl: tk.Label | None = None
+        for w in (widget, getattr(widget, "_label", None)):
+            if w is not None:
+                w.bind("<Enter>", self._show, add="+")
+                w.bind("<Leave>", self._hide, add="+")
+
+    def set(self, text: str) -> None:
+        self._text = text
+        if self._tip_lbl is not None:
+            self._tip_lbl.configure(text=text)
+
+    def _show(self, _event=None) -> None:
+        if not self._text or self._win:
+            return
+        dark = ctk.get_appearance_mode() == "Dark"
+        bg = "#1E1E1E" if dark else "#F0F0F0"
+        fg = "#DDDDDD" if dark else "#222222"
+        self._win = tk.Toplevel(self._widget)
+        self._win.wm_overrideredirect(True)
+        self._win.wm_attributes("-topmost", True)
+        self._win.withdraw()
+        outer = tk.Frame(
+            self._win, background=bg,
+            highlightthickness=1, highlightbackground="#999999",
+        )
+        outer.pack()
+        self._tip_lbl = tk.Label(
+            outer, text=self._text, justify="left", anchor="w",
+            background=bg, foreground=fg, font=("Segoe UI", 10),
+            padx=10, pady=6,
+        )
+        self._tip_lbl.pack()
+        self._win.update_idletasks()
+        h = self._win.winfo_reqheight()
+        x = self._widget.winfo_rootx() + 8
+        y = self._widget.winfo_rooty() - h - 4
+        self._win.wm_geometry(f"+{x}+{y}")
+        self._win.deiconify()
+
+    def _hide(self, _event=None) -> None:
+        if self._win:
+            self._win.destroy()
+            self._win = None
+            self._tip_lbl = None
+
 
 """Root window — instantiates and wires all panels."""
 class AppWindow(ctk.CTk):
@@ -110,13 +165,13 @@ class AppWindow(ctk.CTk):
         icons = ctk.CTkFrame(hdr, fg_color="transparent")
         icons.grid(row=0, column=2, padx=12)
 
-        icon_kw = dict(
-            width=32, height=32,
-            fg_color="transparent",
-            text_color="#F7C1C1",
-            hover_color=_BDX_HOVER,
-            font=ctk.CTkFont(size=17),
-        )
+        icon_kw = {
+            "width": 32, "height": 32,
+            "fg_color": "transparent",
+            "text_color": "#F7C1C1",
+            "hover_color": _BDX_HOVER,
+            "font": ctk.CTkFont(size=17),
+        }
         ctk.CTkButton(
             icons, text="📁",
             command=self._pick_output_dir,
@@ -195,7 +250,7 @@ class AppWindow(ctk.CTk):
         )
         self._download_panel.pack(fill="both", expand=True, padx=14, pady=14)
 
-    """Thin footer row with a mutable status label."""
+    """Thin footer row with a mutable status label and hover tooltip."""
     def _build_statusbar(self) -> None:
         bar = ctk.CTkFrame(
             self,
@@ -211,8 +266,11 @@ class AppWindow(ctk.CTk):
             text="Starting up…",
             font=ctk.CTkFont(size=11),
             text_color=("gray50", "gray55"),
+            cursor="hand2",
         )
         self._status_lbl.pack(side="left", padx=14)
+        self._status_tooltip = _Tooltip(self._status_lbl)
+        self._status_tooltip.set("Checking yt-dlp version and ffmpeg…")
 
     """Amber dismissible banner; hidden until _show_warnings() is called."""
     def _build_warning_banner(self) -> None:
@@ -372,12 +430,25 @@ class AppWindow(ctk.CTk):
             self.after(0, lambda: self._status_lbl.configure(text="yt-dlp not found"))
             return
 
-        ffmpeg_ok = bool(shutil.which("ffmpeg"))
+        try:
+            from core import config_manager as _cm
+            from core.downloader import _resolve_ffmpeg
+            _resolve_ffmpeg(_cm.get("ffmpeg_path"))
+            ffmpeg_ok = True
+        except RuntimeError:
+            ffmpeg_ok = False
         status = (
             f"yt-dlp {version}  ·  "
             f"ffmpeg {'available' if ffmpeg_ok else '⚠ not found'}"
         )
-        self.after(0, lambda: self._status_lbl.configure(text=status))
+        detail = (
+            f"yt-dlp {version}\n"
+            f"ffmpeg: {'available' if ffmpeg_ok else 'NOT FOUND — install ffmpeg and set path in Settings'}"
+        )
+        def _apply_status(s=status, d=detail):
+            self._status_lbl.configure(text=s)
+            self._status_tooltip.set(d)
+        self.after(0, _apply_status)
 
         # Soft warnings
         warnings: list[str] = []
@@ -406,7 +477,7 @@ class AppWindow(ctk.CTk):
             pass
 
         if warnings:
-            _w, _u = list(warnings), has_update
+            _w, _u = warnings[:], has_update
             self.after(0, lambda: self._show_warnings(_w, _u))
 
     # Update dialog #
@@ -462,17 +533,40 @@ class AppWindow(ctk.CTk):
             command=lambda: self._run_update(dlg),
         ).pack(side="right")
 
-    """Dismiss dialog, start yt-dlp update in a daemon thread, update status bar text."""
+    """Dismiss dialog, start yt-dlp update in a daemon thread with elapsed-time animation."""
     def _run_update(self, dlg: ctk.CTkToplevel) -> None:
         dlg.destroy()
-        import subprocess
+        from core.downloader import check_ytdlp_update
 
-        threading.Thread(
-            target=lambda: subprocess.run(
-                ["yt-dlp", "--update-to", "stable"],
-                capture_output=True,
-            ),
-            daemon=True,
-            name="tbdc-update",
-        ).start()
-        self._status_lbl.configure(text="Updating yt-dlp…")
+        _start = time.monotonic()
+
+        def _worker():
+            result = check_ytdlp_update()
+            elapsed = int(time.monotonic() - _start)
+            if result:
+                label = f"yt-dlp updated  ({elapsed}s)"
+                detail = f"Updated in {elapsed}s\n{result}"
+            else:
+                label = f"yt-dlp is already up to date  ({elapsed}s)"
+                detail = f"Already up to date (checked in {elapsed}s)"
+
+            def _finish(lbl=label, det=detail):
+                self._stop_update_anim()
+                self._status_lbl.configure(text=lbl)
+                self._status_tooltip.set(det)
+
+            self.after(0, _finish)
+
+        self._status_tooltip.set("Running: python -m yt_dlp --update-to stable\nWaiting for result…")
+        threading.Thread(target=_worker, daemon=True, name="tbdc-update").start()
+        self._tick_update_anim(_start)
+
+    def _tick_update_anim(self, start: float) -> None:
+        elapsed = int(time.monotonic() - start)
+        self._status_lbl.configure(text=f"Updating yt-dlp… ({elapsed}s)")
+        self._update_anim_id = self.after(1000, self._tick_update_anim, start)
+
+    def _stop_update_anim(self) -> None:
+        if hasattr(self, "_update_anim_id"):
+            self.after_cancel(self._update_anim_id)
+            del self._update_anim_id

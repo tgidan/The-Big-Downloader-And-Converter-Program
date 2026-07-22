@@ -19,6 +19,7 @@ from __future__ import annotations
 import queue
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import yt_dlp
@@ -291,7 +292,7 @@ exception occurs (no network, missing binary, etc.).
 def check_ytdlp_update() -> str | None:
     try:
         result = subprocess.run(
-            ["yt-dlp", "--update-to", "stable"],
+            [sys.executable, "-m", "yt_dlp", "--update-to", "stable"],
             capture_output=True,
             text=True,
             timeout=30,
