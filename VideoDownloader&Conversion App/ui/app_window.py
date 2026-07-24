@@ -543,17 +543,22 @@ class AppWindow(ctk.CTk):
         def _worker():
             result = check_ytdlp_update()
             elapsed = int(time.monotonic() - _start)
-            if result:
-                label = f"yt-dlp updated  ({elapsed}s)"
-                detail = f"Updated in {elapsed}s\n{result}"
+            if not result.ok:
+                label = f"yt-dlp update failed  ({elapsed}s)"
+                detail = f"Update failed after {elapsed}s\n{result.message}"
+            elif result.changed:
+                label = "yt-dlp updated — restart to apply"
+                detail = f"Updated in {elapsed}s\n{result.message}"
             else:
                 label = f"yt-dlp is already up to date  ({elapsed}s)"
                 detail = f"Already up to date (checked in {elapsed}s)"
 
-            def _finish(lbl=label, det=detail):
+            def _finish(res=result, lbl=label, det=detail):
                 self._stop_update_anim()
                 self._status_lbl.configure(text=lbl)
                 self._status_tooltip.set(det)
+                if res.ok and res.changed:
+                    self._show_restart_notice()
 
             self.after(0, _finish)
 
@@ -570,3 +575,48 @@ class AppWindow(ctk.CTk):
         if hasattr(self, "_update_anim_id"):
             self.after_cancel(self._update_anim_id)
             del self._update_anim_id
+
+    """
+    Modal shown after a successful upgrade.
+
+    The running process already imported the old yt-dlp, so the new version
+    only takes effect once the app is restarted; the outdated banner is
+    dismissed here since the on-disk install is now current.
+    """
+    def _show_restart_notice(self) -> None:
+        self._dismiss_banner()
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Restart required")
+        dlg.geometry("400x190")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        dlg.focus()
+
+        ctk.CTkLabel(
+            dlg,
+            text="yt-dlp updated",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w",
+        ).pack(fill="x", padx=22, pady=(22, 4))
+
+        ctk.CTkLabel(
+            dlg,
+            text=(
+                "The new version is installed but this app is still running\n"
+                "the old one. Restart to start using it."
+            ),
+            font=ctk.CTkFont(size=12),
+            text_color=("gray40", "gray60"),
+            justify="left",
+            anchor="w",
+        ).pack(fill="x", padx=22, pady=(0, 18))
+
+        ctk.CTkButton(
+            dlg,
+            text="OK",
+            fg_color=(_BDX, "#A32D2D"),
+            hover_color=(_BDX_HOVER, "#C44040"),
+            text_color=_BDX_TEXT,
+            command=dlg.destroy,
+        ).pack(side="bottom", anchor="e", padx=22, pady=(0, 20))

@@ -517,44 +517,99 @@ class TestLoudnormPP:
 
 class TestCheckYtdlpUpdate:
 
-    def _run(self, stdout="", stderr="", raises=None):
-        if raises is not None:
-            with patch("core.downloader.subprocess.run", side_effect=raises):
+    def _run(self, stdout="", stderr="", returncode=0, raises=None, variant="pip"):
+        with patch("core.downloader._ytdlp_variant", return_value=variant):
+            if raises is not None:
+                with patch("core.downloader.subprocess.run", side_effect=raises):
+                    return check_ytdlp_update()
+            mock_result = MagicMock()
+            mock_result.stdout = stdout
+            mock_result.stderr = stderr
+            mock_result.returncode = returncode
+            with patch("core.downloader.subprocess.run", return_value=mock_result):
                 return check_ytdlp_update()
-        mock_result = MagicMock()
-        mock_result.stdout = stdout
-        mock_result.stderr = stderr
-        with patch("core.downloader.subprocess.run", return_value=mock_result):
-            return check_ytdlp_update()
 
-    def test_up_to_date_returns_none(self):
-        assert self._run(stdout="yt-dlp is up to date") is None
+    # command selection #
 
-    def test_up_to_date_case_insensitive(self):
-        assert self._run(stdout="yt-dlp is Up To Date (2024.01.01)") is None
+    def test_pip_variant_uses_pip_install(self):
+        with patch("core.downloader._ytdlp_variant", return_value="pip"):
+            mock_result = MagicMock(stdout="", stderr="", returncode=0)
+            with patch("core.downloader.subprocess.run", return_value=mock_result) as run:
+                check_ytdlp_update()
+        cmd = run.call_args[0][0]
+        assert cmd[1:] == ["-m", "pip", "install", "-U", "yt-dlp"]
 
-    def test_update_message_returned(self):
-        assert self._run(stdout="Updated yt-dlp to 2024.09.01") == "Updated yt-dlp to 2024.09.01"
+    def test_binary_variant_uses_ytdlp_self_update(self):
+        with patch("core.downloader._ytdlp_variant", return_value="win_exe"):
+            mock_result = MagicMock(stdout="", stderr="", returncode=0)
+            with patch("core.downloader.subprocess.run", return_value=mock_result) as run:
+                check_ytdlp_update()
+        cmd = run.call_args[0][0]
+        assert cmd[1:] == ["-m", "yt_dlp", "--update-to", "stable"]
 
-    def test_stderr_included_in_check(self):
-        # "up to date" in stderr should still return None
-        assert self._run(stderr="yt-dlp is up to date") is None
+    # success / no-op #
 
-    def test_non_update_stderr_returned(self):
-        result = self._run(stderr="New version: 2024.09.01")
-        assert result == "New version: 2024.09.01"
+    def test_pip_successful_install_is_changed(self):
+        result = self._run(stdout="Successfully installed yt-dlp-2026.7.4")
+        assert result.ok is True
+        assert result.changed is True
 
-    def test_empty_output_returns_none(self):
-        assert self._run(stdout="", stderr="") is None
+    def test_ytdlp_updated_message_is_changed(self):
+        result = self._run(stdout="Updated yt-dlp to 2026.07.04", variant="win_exe")
+        assert result.ok is True
+        assert result.changed is True
 
-    def test_whitespace_only_output_returns_none(self):
-        assert self._run(stdout="   ", stderr="  ") is None
+    def test_already_satisfied_is_ok_but_unchanged(self):
+        result = self._run(stdout="Requirement already satisfied: yt-dlp")
+        assert result.ok is True
+        assert result.changed is False
 
-    def test_generic_exception_returns_none(self):
-        assert self._run(raises=Exception("timeout")) is None
+    def test_up_to_date_is_ok_but_unchanged(self):
+        result = self._run(stdout="yt-dlp is up to date (2026.07.04)", variant="win_exe")
+        assert result.ok is True
+        assert result.changed is False
 
-    def test_timeout_expired_returns_none(self):
-        assert self._run(raises=subprocess.TimeoutExpired(cmd="yt-dlp", timeout=10)) is None
+    def test_empty_output_is_ok_but_unchanged(self):
+        result = self._run(stdout="", stderr="")
+        assert result.ok is True
+        assert result.changed is False
+
+    # failure detection #
+
+    """The pip-install refusal that made the old code report a false success."""
+    def test_pip_refusal_on_exit_zero_is_failure(self):
+        result = self._run(
+            stdout="Current version: stable@2026.03.17\nLatest version: stable@2026.07.04",
+            stderr="ERROR: You installed yt-dlp with pip or using the wheel from PyPi; Use that to update",
+            returncode=0,
+            variant="win_exe",
+        )
+        assert result.ok is False
+        assert result.changed is False
+        assert "pip" in result.message
+
+    def test_nonzero_returncode_is_failure(self):
+        result = self._run(stdout="", stderr="Could not find a version", returncode=1)
+        assert result.ok is False
+        assert result.changed is False
+
+    def test_failure_message_falls_back_to_stdout(self):
+        result = self._run(stdout="something broke", stderr="", returncode=2)
+        assert result.message == "something broke"
+
+    def test_failure_with_no_output_has_placeholder_message(self):
+        result = self._run(stdout="", stderr="", returncode=1)
+        assert result.message == "Unknown error"
+
+    def test_generic_exception_is_failure(self):
+        result = self._run(raises=Exception("boom"))
+        assert result.ok is False
+        assert result.changed is False
+
+    def test_timeout_expired_is_failure(self):
+        result = self._run(raises=subprocess.TimeoutExpired(cmd="pip", timeout=10))
+        assert result.ok is False
+        assert result.changed is False
 
 
 # _version_tuple #

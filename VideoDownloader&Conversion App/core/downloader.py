@@ -10,7 +10,7 @@ fetch_info(url)                                  – (formats, info) without dow
 build_video_format_string(height)                – yt-dlp format string for a height cap
 build_audio_format_string()                      – yt-dlp format string for best audio
 download(url, format_string, output_dir, q, …)  – blocking download; push progress to q
-check_ytdlp_update()                             – run yt-dlp --update-to stable
+check_ytdlp_update()                             – upgrade yt-dlp; returns an UpdateResult
 get_ytdlp_latest_version()                       – fetch latest version string from PyPI
 ytdlp_update_available(installed, latest)        – True if latest is a newer CalVer
 """
@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import yt_dlp
 
@@ -285,25 +286,69 @@ def download(
 # yt-dlp update check (optional startup call) #
 
 """
-Run `yt-dlp --update-to stable` and return the output message.
+Outcome of an attempted yt-dlp upgrade.
 
-Returns None when yt-dlp is already up to date, output is empty, or any
-exception occurs (no network, missing binary, etc.).
+ok      – the command ran and did not report an error
+changed – yt-dlp was actually upgraded (a restart is needed to load it)
+message – human-readable detail for the status tooltip
 """
-def check_ytdlp_update() -> str | None:
+class UpdateResult(NamedTuple):
+    ok: bool
+    changed: bool
+    message: str
+
+
+"""
+Return how yt-dlp was installed: "pip", or whatever variant yt-dlp reports
+(e.g. "win_exe", "zip", "source") for a self-updatable build.
+
+Falls back to "pip" when detection fails, since a pip install is the only
+variant this project ships via requirements.txt.
+"""
+def _ytdlp_variant() -> str:
     try:
-        result = subprocess.run(
-            [sys.executable, "-m", "yt_dlp", "--update-to", "stable"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        combined = (result.stdout + result.stderr).strip()
-        if not combined or "up to date" in combined.lower():
-            return None
-        return result.stdout.strip() or result.stderr.strip() or None
+        from yt_dlp.update import detect_variant
+        return detect_variant() or "pip"
     except Exception:
-        return None
+        return "pip"
+
+
+"""
+Upgrade yt-dlp and report what happened.
+
+yt-dlp's own `--update-to` self-updater only works for the standalone
+(PyInstaller) builds — for a pip install it prints an error and still exits 0.
+So a pip install is upgraded with `pip install -U yt-dlp`, and only a
+self-updatable variant goes through `--update-to stable`.
+
+An "ERROR:" anywhere in the output counts as failure even on exit code 0, so a
+refused update is never reported as success.
+"""
+def check_ytdlp_update() -> UpdateResult:
+    variant = _ytdlp_variant()
+    if variant == "pip":
+        cmd = [sys.executable, "-m", "pip", "install", "-U", "yt-dlp"]
+    else:
+        cmd = [sys.executable, "-m", "yt_dlp", "--update-to", "stable"]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except Exception as exc:
+        return UpdateResult(False, False, f"Update failed to run: {exc}")
+
+    combined = (result.stdout + result.stderr).strip()
+    lowered = combined.lower()
+
+    if result.returncode != 0 or "error:" in lowered:
+        detail = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+        return UpdateResult(False, False, detail)
+
+    # pip says "Successfully installed"; yt-dlp says "Updated yt-dlp to".
+    changed = "successfully installed" in lowered or "updated yt-dlp" in lowered
+    if not changed:
+        return UpdateResult(True, False, combined or "Already up to date")
+
+    return UpdateResult(True, True, combined)
 
 
 """Return the latest yt-dlp version string from PyPI, or None on error."""
