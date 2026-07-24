@@ -456,9 +456,9 @@ class AppWindow(ctk.CTk):
 
         # yt-dlp vs. PyPI
         try:
-            from core.downloader import get_ytdlp_latest_version
+            from core.downloader import get_ytdlp_latest_version, ytdlp_update_available
             latest = get_ytdlp_latest_version()
-            if latest and latest > version:
+            if latest and ytdlp_update_available(version, latest):
                 warnings.append(
                     f"yt-dlp {version} is outdated — latest: {latest}. "
                     "YouTube extractors may be broken."

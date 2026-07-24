@@ -27,6 +27,8 @@ from core.downloader import (
     build_audio_format_string,
     download,
     check_ytdlp_update,
+    _version_tuple,
+    ytdlp_update_available,
 )
 
 
@@ -553,3 +555,60 @@ class TestCheckYtdlpUpdate:
 
     def test_timeout_expired_returns_none(self):
         assert self._run(raises=subprocess.TimeoutExpired(cmd="yt-dlp", timeout=10)) is None
+
+
+# _version_tuple #
+
+class TestVersionTuple:
+
+    def test_padded_and_stripped_collapse_to_same_tuple(self):
+        assert _version_tuple("2026.03.17") == (2026, 3, 17)
+        assert _version_tuple("2026.3.17") == (2026, 3, 17)
+        assert _version_tuple("2026.03.17") == _version_tuple("2026.3.17")
+
+    def test_four_component_version(self):
+        assert _version_tuple("2023.07.06.1") == (2023, 7, 6, 1)
+
+    def test_none_returns_none(self):
+        assert _version_tuple(None) is None
+
+    def test_empty_returns_none(self):
+        assert _version_tuple("") is None
+
+    def test_non_numeric_component_returns_none(self):
+        assert _version_tuple("2026.03.dev") is None
+
+
+# ytdlp_update_available #
+
+class TestYtdlpUpdateAvailable:
+
+    def test_padded_vs_stripped_equivalent_is_no_update(self):
+        assert ytdlp_update_available("2026.03.17", "2026.3.17") is False
+
+    def test_newer_latest_is_update(self):
+        assert ytdlp_update_available("2026.03.17", "2026.7.4") is True
+
+    def test_older_latest_is_no_update(self):
+        assert ytdlp_update_available("2026.7.4", "2026.03.17") is False
+
+    def test_identical_strings_is_no_update(self):
+        assert ytdlp_update_available("2026.03.17", "2026.03.17") is False
+
+    def test_four_component_installed_vs_three_component_latest(self):
+        # installed 2026.3.17.1 is newer than latest 2026.3.17 → no update
+        assert ytdlp_update_available("2026.3.17.1", "2026.3.17") is False
+
+    def test_three_component_installed_vs_four_component_latest(self):
+        # latest 2026.3.17.1 is newer than installed 2026.3.17 → update
+        assert ytdlp_update_available("2026.3.17", "2026.3.17.1") is True
+
+    def test_malformed_installed_is_no_update(self):
+        assert ytdlp_update_available("not-a-version", "2026.7.4") is False
+
+    def test_malformed_latest_is_no_update(self):
+        assert ytdlp_update_available("2026.03.17", "garbage") is False
+
+    def test_none_either_side_is_no_update(self):
+        assert ytdlp_update_available(None, "2026.7.4") is False
+        assert ytdlp_update_available("2026.03.17", None) is False

@@ -12,6 +12,7 @@ build_audio_format_string()                      – yt-dlp format string for be
 download(url, format_string, output_dir, q, …)  – blocking download; push progress to q
 check_ytdlp_update()                             – run yt-dlp --update-to stable
 get_ytdlp_latest_version()                       – fetch latest version string from PyPI
+ytdlp_update_available(installed, latest)        – True if latest is a newer CalVer
 """
 
 from __future__ import annotations
@@ -315,3 +316,37 @@ def get_ytdlp_latest_version() -> str | None:
         return data["info"]["version"]
     except Exception:
         return None
+
+
+# Version comparison #
+
+"""
+Parse a yt-dlp CalVer string into a tuple of ints for comparison.
+
+Splits on "." and converts each component to int, so the zero-padded and
+zero-stripped spellings of the same version collapse to the same tuple
+("2026.03.17" and "2026.3.17" both yield (2026, 3, 17)). Returns None
+(never raises) if the string is empty/None or any component is non-numeric.
+"""
+def _version_tuple(version: str | None) -> tuple[int, ...] | None:
+    if not version:
+        return None
+    try:
+        return tuple(int(part) for part in version.split("."))
+    except ValueError:
+        return None
+
+
+"""
+Return True only when `latest` is a strictly newer version than `installed`.
+
+Both strings are parsed to int-tuples via _version_tuple; if either fails to
+parse, returns False so a malformed version can never trigger a false update
+prompt. Shorter tuples compare as expected ((2026, 3) < (2026, 3, 1)).
+"""
+def ytdlp_update_available(installed: str | None, latest: str | None) -> bool:
+    installed_tuple = _version_tuple(installed)
+    latest_tuple = _version_tuple(latest)
+    if installed_tuple is None or latest_tuple is None:
+        return False
+    return latest_tuple > installed_tuple
