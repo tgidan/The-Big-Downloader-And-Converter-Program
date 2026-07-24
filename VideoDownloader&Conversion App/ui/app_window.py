@@ -24,8 +24,10 @@ from pathlib import Path
 
 import customtkinter as ctk
 
+from core import config_manager
 from core.queue_manager import QueueManager
 from core.utils import find_conflicts, unique_path
+from ui.converter_panel import ConverterPanel
 from ui.download_panel import DownloadPanel
 from ui.quality_panel import QualityPanel
 from ui.url_panel import URLPanel
@@ -41,6 +43,31 @@ _BDX_SUB   = "#E24B4A"   # subtitle / de-emphasised on bordeaux bg
 _WARN_BG    = ("#FEF3C7", "#3D2A00")
 _WARN_TEXT  = ("#92400E", "#FBBF24")
 _WARN_HOVER = ("#FDE68A", "#5C4000")
+
+# Tab strip colours #
+# One text colour is shared by selected and unselected buttons, so the
+# unselected fill has to stay dark enough for near-white text in light mode.
+_TAB_TRACK = ("gray40", "gray25")
+_TAB_HOVER = ("gray32", "gray32")
+
+# Main-view tabs #
+_TAB_DOWNLOAD   = "Download"
+_TAB_CONVERT    = "Convert"
+_TAB_NAMES      = (_TAB_DOWNLOAD, _TAB_CONVERT)
+_ACTIVE_TAB_KEY = "active_tab"
+
+
+"""
+Pick a usable tab name from a persisted config value.
+
+CTkTabview.set() raises ValueError for a tab it doesn't know, so a stale or
+hand-edited config must never reach it. Anything that isn't one of
+valid_names — None, a non-string, an empty string, a removed tab — falls back
+to the Download tab.
+"""
+def resolve_active_tab(stored, valid_names: tuple[str, ...] = _TAB_NAMES) -> str:
+    return stored if stored in valid_names else _TAB_DOWNLOAD
+
 
 class _Tooltip:
     """Hover tooltip that floats above any Tkinter/CTk widget."""
@@ -188,10 +215,44 @@ class AppWindow(ctk.CTk):
             **icon_kw,
         ).pack(side="left", padx=4)
 
-    """Left scroll pane (URL + Quality), vertical separator, right sidebar (Queue)."""
+    """Tab strip hosting the Download layout and the Convert placeholder."""
     def _build_content(self) -> None:
-        content = ctk.CTkFrame(self, fg_color="transparent")
-        content.grid(row=2, column=0, sticky="nsew")
+        self._tabview = ctk.CTkTabview(
+            self,
+            # Tab frames are inset by max(corner_radius, border_width); zero both
+            # so the Download layout keeps the padding it had before the tabs.
+            corner_radius=0,
+            border_width=0,
+            fg_color="transparent",
+            segmented_button_fg_color=_TAB_TRACK,
+            segmented_button_selected_color=(_BDX, "#A32D2D"),
+            segmented_button_selected_hover_color=(_BDX_HOVER, "#C44040"),
+            segmented_button_unselected_color=_TAB_TRACK,
+            segmented_button_unselected_hover_color=_TAB_HOVER,
+            text_color=_BDX_TEXT,
+            command=self._on_tab_changed,
+        )
+        self._tabview.grid(row=2, column=0, sticky="nsew")
+
+        self._build_download_tab(self._tabview.add(_TAB_DOWNLOAD))
+        self._build_convert_tab(self._tabview.add(_TAB_CONVERT))
+
+        # set() raises on an unknown tab, so the stored value is filtered first
+        self._tabview.set(resolve_active_tab(config_manager.get(_ACTIVE_TAB_KEY)))
+
+    """Persist the tab the user switched to; fired on click, not on set()."""
+    def _on_tab_changed(self) -> None:
+        config_manager.set(_ACTIVE_TAB_KEY, self._tabview.get())
+
+    """Convert tab: placeholder panel until the converter lands."""
+    def _build_convert_tab(self, parent) -> None:
+        self._converter_panel = ConverterPanel(parent)
+        self._converter_panel.pack(fill="both", expand=True)
+
+    """Left scroll pane (URL + Quality), vertical separator, right sidebar (Queue)."""
+    def _build_download_tab(self, parent) -> None:
+        content = ctk.CTkFrame(parent, fg_color="transparent")
+        content.pack(fill="both", expand=True)
         content.grid_rowconfigure(0, weight=1)
         content.grid_columnconfigure(0, weight=1)
 
