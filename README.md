@@ -4,6 +4,12 @@ A desktop app for downloading videos with **yt-dlp** and browsing the resulting
 library, built with **CustomTkinter**. Any site yt-dlp supports works, not
 just YouTube.
 
+The main window is split into two tabs: **Download**, which holds the URL
+input, quality picker and queue sidebar, and **Convert**, a placeholder for the
+file converter that hasn't been built yet. The header buttons, the warning
+banner and the status bar sit outside the tabs and stay visible from both.
+Whichever tab you leave selected is the one you come back to next launch.
+
 ---
 
 ## Requirements
@@ -45,7 +51,8 @@ python main.py
 ## Configuration
 
 Runtime settings (output directory, last-used quality, ffmpeg path, loudness
-normalization, cookie file, library view mode) are persisted to:
+normalization, cookie file, library view mode, last active tab) are persisted
+to:
 
 ```text
 ~/.tbdc/config.json
@@ -74,10 +81,11 @@ VideoDownloader&Conversion App/
 │   │                         #   metadata, ffmpeg thumbnails, move/create
 │   └── utils.py               # Filename sanitization, conflict/uniqueness
 ├── ui/
-│   ├── app_window.py          # Root window; wires every panel together
+│   ├── app_window.py          # Root window; Download/Convert tabs, wires panels
 │   ├── url_panel.py            # URL input, format fetch, preview card
 │   ├── quality_panel.py        # Quality picker, output folder + subfolder
 │   ├── download_panel.py       # Queue sidebar (progress, pause, reorder)
+│   ├── converter_panel.py      # Convert tab; placeholder for now
 │   ├── settings_panel.py       # Preferences dialog
 │   └── library_panel.py        # Library browser (see below)
 └── tests/                     # pytest; core/ modules and pure UI helpers
