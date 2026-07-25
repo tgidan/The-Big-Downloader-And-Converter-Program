@@ -5,8 +5,9 @@ library, built with **CustomTkinter**. Any site yt-dlp supports works, not
 just YouTube.
 
 The main window is split into two tabs: **Download**, which holds the URL
-input, quality picker and queue sidebar, and **Convert**, a placeholder for the
-file converter that hasn't been built yet. The header buttons, the warning
+input, quality picker and queue sidebar, and **Convert**, which converts
+`.webm` files to `.mp3` — one at a time, with per-file progress and a cancel
+button. Other target formats aren't built yet. The header buttons, the warning
 banner and the status bar sit outside the tabs and stay visible from both.
 Whichever tab you leave selected is the one you come back to next launch.
 
@@ -33,13 +34,19 @@ Whichever tab you leave selected is the one you come back to next launch.
   - downloads that require merging separate video/audio streams will fail
     (single-file formats still work);
   - the library panel's resolution, duration, and thumbnail columns show a
-    placeholder instead of real values.
+    placeholder instead of real values;
+  - the **Convert** tab doesn't work at all — clicking **Convert** shows an
+    inline error naming ffmpeg and how to install it, rather than failing
+    silently or crashing. The Download tab keeps working regardless.
 
   If ffmpeg is on your system `PATH`, it's picked up automatically. Otherwise,
   set a path in **Settings → ffmpeg path** — it can point either at the
   directory containing the `ffmpeg`/`ffprobe` binaries or directly at the
   `ffmpeg` binary itself (see `core/downloader.py:44-65` for the exact
   resolution logic; `core/library_manager.py` mirrors it for `ffprobe`).
+  The converter resolves a `PATH` hit to a concrete path of its own, because it
+  runs ffmpeg directly — `core/downloader.py:61-62` returns `None` there
+  instead, which is all yt-dlp needs since it does its own lookup.
 
 ## Running the app
 
@@ -50,9 +57,9 @@ python main.py
 
 ## Configuration
 
-Runtime settings (output directory, last-used quality, ffmpeg path, loudness
-normalization, cookie file, library view mode, last active tab) are persisted
-to:
+Runtime settings (output directory, conversion output folder, last-used
+quality, ffmpeg path, loudness normalization, cookie file, library view mode,
+last active tab) are persisted to:
 
 ```text
 ~/.tbdc/config.json
@@ -76,6 +83,8 @@ VideoDownloader&Conversion App/
 ├── core/                     # Zero UI imports — safe to call from any thread
 │   ├── downloader.py         # yt-dlp wrapper; download(), format helpers
 │   ├── queue_manager.py      # Ordered download queue, background threads
+│   ├── converter.py          # ffmpeg wrapper; convert(), probe(), output paths
+│   ├── conversion_queue.py   # Ordered conversion queue, background threads
 │   ├── config_manager.py     # Reads/writes ~/.tbdc/config.json
 │   ├── library_manager.py    # Folder tree, video listing/search, ffprobe
 │   │                         #   metadata, ffmpeg thumbnails, move/create
@@ -85,7 +94,7 @@ VideoDownloader&Conversion App/
 │   ├── url_panel.py            # URL input, format fetch, preview card
 │   ├── quality_panel.py        # Quality picker, output folder + subfolder
 │   ├── download_panel.py       # Queue sidebar (progress, pause, reorder)
-│   ├── converter_panel.py      # Convert tab; placeholder for now
+│   ├── converter_panel.py      # Convert tab; file picker, jobs (see below)
 │   ├── settings_panel.py       # Preferences dialog
 │   └── library_panel.py        # Library browser (see below)
 └── tests/                     # pytest; core/ modules and pure UI helpers
@@ -101,7 +110,32 @@ python -m pytest tests/ -v
 
 Tests cover the `core/` modules (mocked yt-dlp/ffprobe/ffmpeg calls — no
 network access or real binaries required) plus the pure, UI-framework-free
-functions extracted from the settings panel.
+functions extracted from the settings, app-window and converter panels.
+
+---
+
+## The Convert tab
+
+Converts `.webm` files to `.mp3`, extracting the audio stream and discarding
+the video. It needs ffmpeg — see **Requirements** above.
+
+- **Add files…** — a multi-select picker filtered to `.webm`. Selected files
+  are listed below the button and can be removed one at a time or cleared all
+  at once.
+- **Output folder** — defaults to your download folder, but it's stored
+  separately (`convert_output_dir`). Pointing conversions somewhere else
+  deliberately leaves the Download tab's destination alone.
+- **Convert to** — the target format. Only `mp3` for now; `mp4`, `png` and
+  `jpeg` are planned.
+- **Jobs run one at a time, in the order you added them.** Each gets a row in
+  the right-hand sidebar with its own progress bar, status and **✕** button.
+  A file that fails shows ffmpeg's own error message on its row, and the rest
+  of the queue carries on.
+- **Name collisions are never resolved silently.** If an output file already
+  exists, converting stops and asks: **Auto-number** writes `name (1).mp3`,
+  **Overwrite** replaces the existing file. Nothing is written until you pick.
+- **Cancelling** stops ffmpeg and deletes the half-written file, so an
+  interrupted job never leaves a broken `.mp3` behind.
 
 ---
 
