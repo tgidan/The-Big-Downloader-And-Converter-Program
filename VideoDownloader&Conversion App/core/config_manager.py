@@ -33,6 +33,9 @@ _DEFAULTS: dict = {
     "cookiefile":             None,
     "library_view_mode":      "list",
     "active_tab":             "Download",
+    # None means "follow output_dir". Kept separate so choosing a folder in the
+    # Convert tab never silently retargets where downloads land.
+    "convert_output_dir":     None,
 }
 
 # State #

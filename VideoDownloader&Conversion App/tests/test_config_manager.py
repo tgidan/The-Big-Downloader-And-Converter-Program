@@ -343,3 +343,27 @@ class TestNewDefaults:
         _reset(cfg)
         cm.load()
         assert cm._data["active_tab"] == "Download"
+
+    """None means 'follow output_dir' — the Convert tab must not retarget downloads."""
+    def test_convert_output_dir_default_is_none(self, tmp_path):
+        _reset(tmp_path / "config.json")
+        cm.load()
+        assert cm._data.get("convert_output_dir") is None
+
+    def test_convert_output_dir_added_to_config_missing_the_key(self, tmp_path):
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"output_dir": "/my/videos"}), encoding="utf-8")
+        _reset(cfg)
+        cm.load()
+        assert cm._data["convert_output_dir"] is None
+
+    def test_convert_output_dir_is_separate_from_output_dir(self, tmp_path):
+        cfg = tmp_path / "config.json"
+        cfg.write_text(
+            json.dumps({"output_dir": "/downloads", "convert_output_dir": "/conversions"}),
+            encoding="utf-8",
+        )
+        _reset(cfg)
+        cm.load()
+        assert cm._data["output_dir"] == "/downloads"
+        assert cm._data["convert_output_dir"] == "/conversions"
