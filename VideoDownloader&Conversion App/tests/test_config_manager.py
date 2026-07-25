@@ -331,3 +331,15 @@ class TestNewDefaults:
         _reset(tmp_path / "config.json")
         cm.load()
         assert cm._data.get("loudness_target_lufs") == -14.0
+
+    def test_active_tab_default_is_download(self, tmp_path):
+        _reset(tmp_path / "config.json")
+        cm.load()
+        assert cm._data.get("active_tab") == "Download"
+
+    def test_active_tab_added_to_config_missing_the_key(self, tmp_path):
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"output_dir": "/my/videos"}), encoding="utf-8")
+        _reset(cfg)
+        cm.load()
+        assert cm._data["active_tab"] == "Download"
